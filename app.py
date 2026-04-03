@@ -1,5 +1,4 @@
-
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response
 import requests
 from bs4 import BeautifulSoup
 import re
@@ -177,6 +176,18 @@ def fav_kaydet(data):
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/proxy/img")
+def proxy_img():
+    url = request.args.get("url", "")
+    if not url.startswith("http"):
+        return "", 400
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=8)
+        return Response(r.content, content_type=r.headers.get("Content-Type", "image/jpeg"))
+    except Exception:
+        return "", 404
 
 
 @app.route("/api/ara")
