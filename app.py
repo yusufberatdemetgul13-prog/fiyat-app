@@ -1,4 +1,5 @@
 from flask import Flask, render_template, request, jsonify, Response
+from werkzeug.middleware.proxy_fix import ProxyFix
 import requests
 from bs4 import BeautifulSoup
 import re
@@ -8,6 +9,7 @@ import hashlib
 import threading
 
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 HEADERS = {
     "User-Agent": (
@@ -20,6 +22,7 @@ HEADERS = {
 }
 TIMEOUT = 15
 FAV_DOSYA = os.path.join(os.path.dirname(__file__), "favoriler.json")
+ANON_USER_KEY = "anon"
 
 
 def temizle_fiyat(metin):
@@ -47,7 +50,61 @@ def href_to_abs(href, base):
 
 def urun_id(urun):
     key = urun.get("url") or (urun["site"] + urun["isim"])
-    return hashlib.md5(key.encode()).hexdigest()
+    return hashlib.md5(key.encode("utf-8")).hexdigest()
+
+
+def kullanici_anahtari():
+    return ANON_USER_KEY
+
+
+def _bos_siteler():
+    return {s: {} for s in SCRAPER_MAP.keys()}
+
+
+def fav_db_yukle():
+    if not os.path.exists(FAV_DOSYA):
+        return {"v": 2, "users": {}}
+    try:
+        with open(FAV_DOSYA, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        return {"v": 2, "users": {}}
+
+    if isinstance(raw, dict) and raw.get("v") == 2:
+        return raw
+
+    # Eski düz { id: ürün } dosyası
+    if isinstance(raw, dict) and raw and "v" not in raw:
+        ilk = next(iter(raw.values()), None)
+        if isinstance(ilk, dict) and "site" in ilk:
+            by_site = _bos_siteler()
+            for kid, p in raw.items():
+                site = p.get("site")
+                if site not in by_site:
+                    by_site[site] = {}
+                by_site[site][kid] = p
+            return {
+                "v": 2,
+                "users": {ANON_USER_KEY: {"profile": None, "by_site": by_site}},
+            }
+    return {"v": 2, "users": {}}
+
+
+def fav_db_kaydet(db):
+    with open(FAV_DOSYA, "w", encoding="utf-8") as f:
+        json.dump(db, f, ensure_ascii=False, indent=2)
+
+
+def kullanici_bucket_al(db, user_key):
+    if user_key not in db["users"]:
+        db["users"][user_key] = {"profile": None, "by_site": _bos_siteler()}
+    u = db["users"][user_key]
+    if "by_site" not in u or not isinstance(u["by_site"], dict):
+        u["by_site"] = _bos_siteler()
+    for s in SCRAPER_MAP:
+        if s not in u["by_site"]:
+            u["by_site"][s] = {}
+    return u
 
 
 def ara_direnc(kelime):
@@ -151,7 +208,6 @@ def ara_motorobit(kelime):
 
 
 def ara_robocombo(kelime):
-    """Robocombo (Ticimax): ürün listesi /api/product/GetProductList JSON API."""
     if not kelime or not kelime.strip():
         return []
     base = "https://www.robocombo.com"
@@ -258,24 +314,9 @@ SCRAPER_MAP = {
 }
 
 
-def fav_yukle():
-    if os.path.exists(FAV_DOSYA):
-        try:
-            with open(FAV_DOSYA, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-
-def fav_kaydet(data):
-    with open(FAV_DOSYA, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", site_keys=list(SCRAPER_MAP.keys()))
 
 
 @app.route("/proxy/img")
@@ -300,6 +341,7 @@ def ara():
         siteler = list(SCRAPER_MAP.keys())
     sonuclar = []
     lock = threading.Lock()
+
     def calistir(site_adi):
         fn = SCRAPER_MAP.get(site_adi)
         if fn:
@@ -309,24 +351,51 @@ def ara():
                 res = []
             with lock:
                 sonuclar.extend(res)
+
     threads = [threading.Thread(target=calistir, args=(s,), daemon=True) for s in siteler]
-    for t in threads: t.start()
-    for t in threads: t.join()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    for u in sonuclar:
+        u["id"] = urun_id(u)
     return jsonify(sonuclar)
 
 
 @app.route("/api/favoriler", methods=["GET"])
 def favoriler_listele():
-    data = fav_yukle()
-    return jsonify(list(data.values()))
+    db = fav_db_yukle()
+    uk = kullanici_anahtari()
+    bucket = kullanici_bucket_al(db, uk)
+    out = {}
+    counts = {}
+    total = 0
+    for site in SCRAPER_MAP:
+        d = bucket["by_site"].get(site, {})
+        lst = []
+        for kid, p in d.items():
+            item = dict(p)
+            item["id"] = kid
+            lst.append(item)
+        out[site] = lst
+        counts[site] = len(lst)
+        total += len(lst)
+    return jsonify({"by_site": out, "counts": counts, "total": total})
 
 
 @app.route("/api/favoriler", methods=["POST"])
 def favori_ekle():
     urun = request.json
-    data = fav_yukle()
-    kid = urun_id(urun)
-    data[kid] = {
+    if not urun or not urun.get("site"):
+        return jsonify({"error": "Geçersiz ürün"}), 400
+    site = urun["site"]
+    if site not in SCRAPER_MAP:
+        return jsonify({"error": "Bilinmeyen site"}), 400
+    kid = urun.get("id") or urun_id(urun)
+    db = fav_db_yukle()
+    uk = kullanici_anahtari()
+    bucket = kullanici_bucket_al(db, uk)
+    kayit = {
         "site": urun["site"],
         "isim": urun["isim"],
         "fiyat_metin": urun.get("fiyat_metin", ""),
@@ -334,24 +403,41 @@ def favori_ekle():
         "url": urun.get("url", ""),
         "img_url": urun.get("img_url", ""),
     }
-    fav_kaydet(data)
+    bucket["by_site"][site][kid] = kayit
+    fav_db_kaydet(db)
     return jsonify({"ok": True, "id": kid})
 
 
 @app.route("/api/favoriler/<kid>", methods=["DELETE"])
 def favori_cikar(kid):
-    data = fav_yukle()
-    data.pop(kid, None)
-    fav_kaydet(data)
-    return jsonify({"ok": True})
+    db = fav_db_yukle()
+    uk = kullanici_anahtari()
+    bucket = kullanici_bucket_al(db, uk)
+    for site in bucket["by_site"]:
+        if kid in bucket["by_site"][site]:
+            del bucket["by_site"][site][kid]
+            fav_db_kaydet(db)
+            return jsonify({"ok": True})
+    return jsonify({"ok": False}), 404
 
 
 @app.route("/api/favoriler/kontrol", methods=["POST"])
 def favori_kontrol():
-    urun = request.json
-    data = fav_yukle()
-    kid = urun_id(urun)
-    return jsonify({"favori": kid in data, "id": kid})
+    urun = request.json or {}
+    kid = urun.get("id") or urun_id(urun)
+    site = urun.get("site")
+    db = fav_db_yukle()
+    uk = kullanici_anahtari()
+    bucket = kullanici_bucket_al(db, uk)
+    fav = False
+    if site and site in bucket["by_site"]:
+        fav = kid in bucket["by_site"][site]
+    else:
+        for s in bucket["by_site"]:
+            if kid in bucket["by_site"][s]:
+                fav = True
+                break
+    return jsonify({"favori": fav, "id": kid})
 
 
 if __name__ == "__main__":
