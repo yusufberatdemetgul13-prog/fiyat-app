@@ -96,6 +96,44 @@
   .empty-state h3 { font-size: 16px; font-weight: 800; margin-bottom: 6px; color: #555; }
   .empty-state p { font-size: 13px; line-height: 1.5; }
   .hidden { display: none !important; }
+  .fav-site-tabs {
+    display: flex;
+    gap: 6px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    background: #fafafa;
+    border-bottom: 1px solid var(--border);
+    scrollbar-width: none;
+  }
+  .fav-site-tabs::-webkit-scrollbar { display: none; }
+  .fav-site-tab {
+    flex: 0 0 auto;
+    padding: 8px 12px;
+    border-radius: 20px;
+    border: 2px solid var(--border);
+    background: white;
+    font-size: 11px;
+    font-weight: 800;
+    font-family: 'Nunito', sans-serif;
+    cursor: pointer;
+    color: var(--muted);
+    transition: all 0.15s;
+    -webkit-appearance: none;
+  }
+  .fav-site-tab.active {
+    color: white;
+    border-color: transparent;
+  }
+  .fav-site-tab .badge {
+    display: inline-block;
+    min-width: 18px;
+    padding: 0 5px;
+    border-radius: 10px;
+    font-size: 10px;
+    margin-left: 4px;
+    background: rgba(0,0,0,0.15);
+  }
+  .fav-site-tab.active .badge { background: rgba(255,255,255,0.25); }
 </style>
 </head>
 <body>
@@ -134,12 +172,19 @@
   <button class="tab" id="tabFavoriler" onclick="sekmeDegistir('favoriler')">♥ Favorilerim</button>
 </div>
 
-<div class="toolbar">
+<div class="toolbar" id="aramaToolbar">
   <span class="status-text" id="statusText">Ürün adı girerek arama yapın</span>
   <select class="sort-select" id="sortSelect" onchange="siralaVeGoster()">
     <option value="fiyat_asc">Fiyat ↑</option>
     <option value="fiyat_desc">Fiyat ↓</option>
     <option value="site">Site</option>
+  </select>
+</div>
+<div class="toolbar hidden" id="favToolbar">
+  <span class="status-text" id="favStatusText">Favoriler</span>
+  <select class="sort-select" id="favSortSelect" onchange="favoriSiralaGoster()">
+    <option value="fiyat_asc">Fiyat ↑</option>
+    <option value="fiyat_desc">Fiyat ↓</option>
   </select>
 </div>
 
@@ -155,6 +200,7 @@
 </div>
 
 <div id="favorilerSection" class="hidden">
+  <div class="fav-site-tabs" id="favSiteTabs"></div>
   <div class="cards-container" id="favGrid"></div>
   <div class="empty-state hidden" id="favEmpty">
     <div class="icon">♡</div>
@@ -164,9 +210,14 @@
 </div>
 
 <script>
+const SITE_KEYS = {{ site_keys | tojson }};
 let sonuclar = [];
 let aktifSekme = 'arama';
 let favoriMap = {};
+let favoriBySite = {};
+let favoriCounts = {};
+let favoriTotal = 0;
+let aktifFavSite = SITE_KEYS[0] || 'direnc.net';
 
 const SITE_RENK = {
   'direnc.net': '#E53935',
@@ -179,6 +230,13 @@ const SITE_RENK = {
 function proxyImg(url) {
   if (!url) return '';
   return '/proxy/img?url=' + encodeURIComponent(url);
+}
+
+function escapeHtml(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
 }
 
 document.getElementById('searchInput').addEventListener('keydown', e => {
@@ -215,6 +273,10 @@ async function aramaYap() {
     siteler.forEach(s => params.append('siteler', s));
     const res = await fetch(`/api/ara?${params}`);
     sonuclar = await res.json();
+    if (sonuclar.error) {
+      sonuclar = [];
+      throw new Error(sonuclar.error);
+    }
     await favoriDurumlariniYukle();
     const gercek = sonuclar.filter(r => r.fiyat != null);
     document.getElementById('statusText').textContent =
@@ -239,10 +301,10 @@ function siralaVeGoster() {
   } else {
     sirali.sort((a, b) => a.site.localeCompare(b.site));
   }
-  renderGrid(document.getElementById('aramaGrid'), sirali, 'aramaEmpty');
+  renderGrid(document.getElementById('aramaGrid'), sirali, 'aramaEmpty', true);
 }
 
-function renderGrid(grid, urunler, emptyId) {
+function renderGrid(grid, urunler, emptyId, showEnUcuz) {
   grid.innerHTML = '';
   if (!urunler.length) {
     document.getElementById(emptyId).classList.remove('hidden');
@@ -250,11 +312,12 @@ function renderGrid(grid, urunler, emptyId) {
   }
   document.getElementById(emptyId).classList.add('hidden');
   const fiyatlar = urunler.map(r => r.fiyat).filter(f => f != null);
-  const enUcuz = fiyatlar.length ? Math.min(...fiyatlar) : null;
+  const enUcuz = showEnUcuz && fiyatlar.length ? Math.min(...fiyatlar) : null;
   urunler.forEach(urun => {
-    const kid = urunId(urun);
-    const isFav = !!favoriMap[kid];
-    const isEnUcuz = urun.fiyat != null && urun.fiyat === enUcuz;
+    const id = urun.id;
+    if (!id) return;
+    const isFav = !!favoriMap[id];
+    const isEnUcuz = enUcuz != null && urun.fiyat != null && urun.fiyat === enUcuz;
     const renk = SITE_RENK[urun.site] || '#888';
     const imgSrc = proxyImg(urun.img_url);
     const card = document.createElement('div');
@@ -263,19 +326,20 @@ function renderGrid(grid, urunler, emptyId) {
       <div class="card-img-wrap">
         ${imgSrc ? `<img class="card-img" src="${imgSrc}" alt="" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">` : ''}
         <div class="card-img-placeholder" style="${imgSrc ? 'display:none' : ''}">📦</div>
-        <button class="fav-btn ${isFav ? 'active' : ''}" data-kid="${kid}" onclick="toggleFav(event, ${JSON.stringify(urun).replace(/"/g, '&quot;')})">
+        <button type="button" class="fav-btn ${isFav ? 'active' : ''}" data-id="${id}">
           ${isFav ? '♥' : '♡'}
         </button>
       </div>
       <div class="card-body">
-        <span class="site-badge" style="background:${renk}">${urun.site}</span>
-        <div class="card-name">${urun.isim}</div>
+        <span class="site-badge" style="background:${renk}">${escapeHtml(urun.site)}</span>
+        <div class="card-name">${escapeHtml(urun.isim)}</div>
         <div class="card-price-row">
-          <span class="card-price ${isEnUcuz ? 'cheapest' : ''}">${urun.fiyat_metin || '—'}</span>
+          <span class="card-price ${isEnUcuz ? 'cheapest' : ''}">${escapeHtml(urun.fiyat_metin || '—')}</span>
           ${isEnUcuz ? '<span class="cheapest-badge">EN UCUZ</span>' : ''}
         </div>
       </div>
     `;
+    card.querySelector('.fav-btn').addEventListener('click', ev => toggleFav(ev, id));
     if (urun.url && urun.url.startsWith('http')) {
       card.addEventListener('click', e => {
         if (e.target.closest('.fav-btn')) return;
@@ -289,19 +353,27 @@ function renderGrid(grid, urunler, emptyId) {
 async function favoriDurumlariniYukle() {
   try {
     const res = await fetch('/api/favoriler');
-    const favList = await res.json();
+    const data = await res.json();
+    favoriBySite = data.by_site || {};
+    favoriCounts = data.counts || {};
+    favoriTotal = data.total || 0;
     favoriMap = {};
-    favList.forEach(f => { favoriMap[urunId(f)] = f; });
+    SITE_KEYS.forEach(site => {
+      (favoriBySite[site] || []).forEach(p => {
+        if (p.id) favoriMap[p.id] = p;
+      });
+    });
   } catch(e) {}
 }
 
-async function toggleFav(e, urun) {
+async function toggleFav(e, id) {
   e.stopPropagation();
-  const kid = urunId(urun);
+  const urun = sonuclar.find(u => u.id === id) || favoriMap[id];
+  if (!urun || !urun.id) return;
   const btn = e.currentTarget;
-  if (favoriMap[kid]) {
-    await fetch(`/api/favoriler/${kid}`, { method: 'DELETE' });
-    delete favoriMap[kid];
+  if (favoriMap[urun.id]) {
+    await fetch(`/api/favoriler/${encodeURIComponent(urun.id)}`, { method: 'DELETE' });
+    delete favoriMap[urun.id];
     btn.textContent = '♡';
     btn.classList.remove('active');
   } else {
@@ -310,39 +382,68 @@ async function toggleFav(e, urun) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(urun)
     });
-    favoriMap[kid] = urun;
+    favoriMap[urun.id] = { ...urun };
     btn.textContent = '♥';
     btn.classList.add('active');
   }
+  await favoriDurumlariniYukle();
   guncelFavSayac();
-  if (aktifSekme === 'favoriler') favoriGoster();
-}
-
-function urunId(urun) {
-  const key = urun.url || (urun.site + urun.isim);
-  return btoa(encodeURIComponent(key)).replace(/[^a-zA-Z0-9]/g, '').substring(0, 32);
+  buildFavSiteTabs();
+  if (aktifSekme === 'favoriler') favoriSiralaGoster();
 }
 
 function guncelFavSayac() {
-  const n = Object.keys(favoriMap).length;
   const el = document.getElementById('favCount');
-  if (n > 0) {
-    el.textContent = `♥ ${n}`;
+  if (favoriTotal > 0) {
+    el.textContent = `♥ ${favoriTotal}`;
     el.classList.remove('hidden');
   } else {
     el.classList.add('hidden');
   }
 }
 
+function buildFavSiteTabs() {
+  const wrap = document.getElementById('favSiteTabs');
+  wrap.innerHTML = '';
+  SITE_KEYS.forEach(site => {
+    const n = favoriCounts[site] || 0;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'fav-site-tab' + (site === aktifFavSite ? ' active' : '');
+    b.style.background = site === aktifFavSite ? (SITE_RENK[site] || '#888') : '';
+    b.innerHTML = `${escapeHtml(site)} <span class="badge">${n}</span>`;
+    b.addEventListener('click', () => {
+      aktifFavSite = site;
+      buildFavSiteTabs();
+      favoriSiralaGoster();
+    });
+    wrap.appendChild(b);
+  });
+}
+
+function favoriSiralaGoster() {
+  let list = [...(favoriBySite[aktifFavSite] || [])];
+  const sort = document.getElementById('favSortSelect').value;
+  if (sort === 'fiyat_asc') {
+    list.sort((a, b) => (a.fiyat ?? Infinity) - (b.fiyat ?? Infinity));
+  } else {
+    list.sort((a, b) => (b.fiyat ?? -1) - (a.fiyat ?? -1));
+  }
+  const n = list.length;
+  document.getElementById('favStatusText').textContent =
+    n ? `${aktifFavSite} — ${n} ürün` : `${aktifFavSite} — boş`;
+  renderGrid(document.getElementById('favGrid'), list, 'favEmpty', false);
+}
+
 async function favoriGoster() {
   await favoriDurumlariniYukle();
-  try {
-    const res = await fetch('/api/favoriler');
-    const favList = await res.json();
-    document.getElementById('statusText').textContent =
-      favList.length ? `${favList.length} favori ürün` : 'Henüz favori eklemediniz';
-    renderGrid(document.getElementById('favGrid'), favList, 'favEmpty');
-  } catch(e) {}
+  guncelFavSayac();
+  const hasAny = SITE_KEYS.some(s => (favoriCounts[s] || 0) > 0);
+  if (hasAny && !SITE_KEYS.some(s => s === aktifFavSite && (favoriCounts[s] || 0) > 0)) {
+    aktifFavSite = SITE_KEYS.find(s => (favoriCounts[s] || 0) > 0) || SITE_KEYS[0];
+  }
+  buildFavSiteTabs();
+  favoriSiralaGoster();
 }
 
 function sekmeDegistir(sekme) {
@@ -351,7 +452,13 @@ function sekmeDegistir(sekme) {
   document.getElementById('tabFavoriler').classList.toggle('active', sekme === 'favoriler');
   document.getElementById('aramaSection').classList.toggle('hidden', sekme !== 'arama');
   document.getElementById('favorilerSection').classList.toggle('hidden', sekme !== 'favoriler');
+  document.getElementById('aramaToolbar').classList.toggle('hidden', sekme !== 'arama');
+  document.getElementById('filtersRow').classList.toggle('hidden', sekme !== 'arama');
+  document.getElementById('favToolbar').classList.toggle('hidden', sekme !== 'favoriler');
   if (sekme === 'favoriler') favoriGoster();
+  else if (sonuclar.length === 0) {
+    document.getElementById('statusText').textContent = 'Ürün adı girerek arama yapın';
+  }
 }
 
 (async () => {
