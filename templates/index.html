@@ -210,7 +210,7 @@
 </div>
 
 <script>
-const SITE_KEYS = {{ site_keys | tojson }};
+const SITE_KEYS = {% if site_keys is defined %}{{ site_keys | tojson }}{% else %}["direnc.net","robotistan.com","robolinkmarket.com","robocombo.com","motorobit.com"]{% endif %};
 let sonuclar = [];
 let aktifSekme = 'arama';
 let favoriMap = {};
