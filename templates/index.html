@@ -1,358 +1,363 @@
-from flask import Flask, render_template, request, jsonify, Response
-import requests
-from bs4 import BeautifulSoup
-import re
-import json
-import os
-import hashlib
-import threading
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="komponentx">
+<title>komponentx</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --orange: #FF6000;
+    --orange-dark: #CC4C00;
+    --green: #00A650;
+    --bg: #F3F3F3;
+    --card: #FFFFFF;
+    --border: #E8E8E8;
+    --text: #1D1D1D;
+    --muted: #888;
+    --fav: #FF3B3B;
+    --site-direnc: #E53935;
+    --site-robotistan: #1976D2;
+    --site-robolinkmarket: #388E3C;
+    --site-robocombo: #7B1FA2;
+    --site-motorobit: #F57C00;
+    --radius: 14px;
+    --shadow: 0 2px 12px rgba(0,0,0,0.08);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  body {
+    font-family: 'Nunito', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    max-width: 600px;
+    margin: 0 auto;
+  }
+  .header {
+    background: var(--orange);
+    padding: 14px 16px 10px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    box-shadow: 0 2px 8px rgba(255,96,0,0.3);
+  }
+  .header-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .header h1 { color: white; font-size: 19px; font-weight: 900; letter-spacing: -0.3px; }
+  .fav-count { color: white; font-size: 13px; font-weight: 700; background: rgba(255,255,255,0.2); padding: 4px 10px; border-radius: 20px; }
+  .search-row { display: flex; gap: 8px; }
+  .search-input { flex: 1; padding: 10px 14px; border-radius: 10px; border: none; font-size: 15px; font-family: 'Nunito', sans-serif; font-weight: 600; outline: none; background: white; color: var(--text); }
+  .search-input::placeholder { color: #aaa; font-weight: 600; }
+  .search-btn { padding: 10px 18px; background: var(--orange-dark); color: white; border: none; border-radius: 10px; font-size: 14px; font-family: 'Nunito', sans-serif; font-weight: 800; cursor: pointer; white-space: nowrap; transition: background 0.15s; -webkit-appearance: none; }
+  .search-btn:active { background: #993a00; }
+  .filters { background: white; padding: 10px 16px; border-bottom: 1px solid var(--border); overflow-x: auto; display: flex; gap: 6px; scrollbar-width: none; }
+  .filters::-webkit-scrollbar { display: none; }
+  .filter-chip { display: flex; align-items: center; gap: 5px; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 700; cursor: pointer; border: 2px solid transparent; white-space: nowrap; user-select: none; transition: opacity 0.15s; -webkit-appearance: none; }
+  .filter-chip input { display: none; }
+  .filter-chip.checked { opacity: 1; color: white; }
+  .filter-chip.unchecked { opacity: 0.45; background: #f0f0f0 !important; color: #555; }
+  .chip-direnc { background: var(--site-direnc); color: white; }
+  .chip-robotistan { background: var(--site-robotistan); color: white; }
+  .chip-robolinkmarket { background: var(--site-robolinkmarket); color: white; }
+  .chip-robocombo { background: var(--site-robocombo); color: white; }
+  .chip-motorobit { background: var(--site-motorobit); color: white; }
+  .tabs { display: flex; background: white; border-bottom: 2px solid var(--border); }
+  .tab { flex: 1; padding: 12px; text-align: center; font-size: 14px; font-weight: 800; cursor: pointer; border: none; background: none; color: var(--muted); border-bottom: 3px solid transparent; margin-bottom: -2px; transition: all 0.15s; font-family: 'Nunito', sans-serif; -webkit-appearance: none; }
+  .tab.active { color: var(--orange); border-bottom-color: var(--orange); }
+  .toolbar { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; background: #FAFAFA; border-bottom: 1px solid var(--border); }
+  .status-text { font-size: 12px; color: var(--muted); font-weight: 600; }
+  .sort-select { font-size: 12px; font-family: 'Nunito', sans-serif; font-weight: 700; border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; background: white; color: var(--text); cursor: pointer; outline: none; }
+  .progress-bar { height: 3px; background: var(--border); display: none; }
+  .progress-bar.loading { display: block; background: linear-gradient(90deg, var(--orange) 0%, #ffb347 50%, var(--orange) 100%); background-size: 200% 100%; animation: progress-anim 1.2s infinite; }
+  @keyframes progress-anim { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+  .cards-container { padding: 12px; display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
+  @media (max-width: 380px) { .cards-container { grid-template-columns: repeat(2, 1fr); } }
+  .card { background: var(--card); border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); cursor: pointer; transition: transform 0.15s, box-shadow 0.15s; position: relative; border: 1.5px solid var(--border); display: flex; flex-direction: column; }
+  .card:active { transform: scale(0.97); }
+  .card-img-wrap { position: relative; width: 100%; padding-bottom: 75%; background: #f8f8f8; overflow: hidden; }
+  .card-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; padding: 8px; }
+  .card-img-placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #ccc; font-size: 28px; }
+  .fav-btn { position: absolute; top: 6px; right: 6px; background: white; border: none; border-radius: 50%; width: 30px; height: 30px; font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 4px rgba(0,0,0,0.15); z-index: 2; -webkit-appearance: none; transition: transform 0.15s; }
+  .fav-btn:active { transform: scale(1.25); }
+  .fav-btn.active { color: var(--fav); }
+  .fav-btn:not(.active) { color: #ccc; }
+  .card-body { padding: 8px 10px 10px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+  .site-badge { display: inline-block; font-size: 10px; font-weight: 800; color: white; padding: 2px 7px; border-radius: 4px; width: fit-content; }
+  .card-name { font-size: 12px; font-weight: 700; color: var(--text); line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; flex: 1; }
+  .card-price-row { display: flex; align-items: center; gap: 5px; margin-top: 4px; }
+  .card-price { font-size: 15px; font-weight: 900; color: var(--orange); }
+  .card-price.cheapest { color: var(--green); }
+  .cheapest-badge { font-size: 9px; font-weight: 800; background: var(--green); color: white; padding: 1px 5px; border-radius: 4px; }
+  .empty-state { text-align: center; padding: 60px 20px; color: var(--muted); }
+  .empty-state .icon { font-size: 48px; margin-bottom: 12px; }
+  .empty-state h3 { font-size: 16px; font-weight: 800; margin-bottom: 6px; color: #555; }
+  .empty-state p { font-size: 13px; line-height: 1.5; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
 
-app = Flask(__name__)
+<div class="header">
+  <div class="header-top">
+    <h1>komponentx</h1>
+    <span class="fav-count hidden" id="favCount"></span>
+  </div>
+  <div class="search-row">
+    <input type="text" class="search-input" id="searchInput" placeholder="Ürün ara… (arduino, led, sensor)" autocomplete="off" autocorrect="off" spellcheck="false">
+    <button class="search-btn" id="searchBtn" onclick="aramaYap()">Ara</button>
+  </div>
+</div>
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "tr-TR,tr;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-}
-TIMEOUT = 15
-FAV_DOSYA = os.path.join(os.path.dirname(__file__), "favoriler.json")
+<div class="filters" id="filtersRow">
+  <label class="filter-chip chip-direnc checked" id="chip-direnc.net">
+    <input type="checkbox" checked> direnc.net
+  </label>
+  <label class="filter-chip chip-robotistan checked" id="chip-robotistan.com">
+    <input type="checkbox" checked> robotistan.com
+  </label>
+  <label class="filter-chip chip-robolinkmarket checked" id="chip-robolinkmarket.com">
+    <input type="checkbox" checked> robolinkmarket.com
+  </label>
+  <label class="filter-chip chip-robocombo checked" id="chip-robocombo.com">
+    <input type="checkbox" checked> robocombo.com
+  </label>
+  <label class="filter-chip chip-motorobit checked" id="chip-motorobit.com">
+    <input type="checkbox" checked> motorobit.com
+  </label>
+</div>
 
+<div class="tabs">
+  <button class="tab active" id="tabArama" onclick="sekmeDegistir('arama')">🔍 Arama</button>
+  <button class="tab" id="tabFavoriler" onclick="sekmeDegistir('favoriler')">♥ Favorilerim</button>
+</div>
 
-def temizle_fiyat(metin):
-    if not metin:
-        return None
-    metin = metin.replace(".", "").replace(",", ".").strip()
-    sayilar = re.findall(r"[\d.]+", metin)
-    return float(sayilar[0]) if sayilar else None
+<div class="toolbar">
+  <span class="status-text" id="statusText">Ürün adı girerek arama yapın</span>
+  <select class="sort-select" id="sortSelect" onchange="siralaVeGoster()">
+    <option value="fiyat_asc">Fiyat ↑</option>
+    <option value="fiyat_desc">Fiyat ↓</option>
+    <option value="site">Site</option>
+  </select>
+</div>
 
+<div class="progress-bar" id="progressBar"></div>
 
-def get_soup(url):
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-        r.encoding = r.apparent_encoding
-        return BeautifulSoup(r.text, "html.parser")
-    except Exception:
-        return None
+<div id="aramaSection">
+  <div class="cards-container" id="aramaGrid"></div>
+  <div class="empty-state" id="aramaEmpty">
+    <div class="icon">🔍</div>
+    <h3>Aramaya hazır</h3>
+    <p>Arduino, LED, sensör gibi<br>elektronik ürünleri karşılaştırın</p>
+  </div>
+</div>
 
+<div id="favorilerSection" class="hidden">
+  <div class="cards-container" id="favGrid"></div>
+  <div class="empty-state hidden" id="favEmpty">
+    <div class="icon">♡</div>
+    <h3>Favori yok</h3>
+    <p>Ürün kartlarındaki kalp ikonuna<br>tıklayarak favorilere ekleyebilirsiniz</p>
+  </div>
+</div>
 
-def href_to_abs(href, base):
-    if href and not href.startswith("http"):
-        return base + href
-    return href or ""
+<script>
+let sonuclar = [];
+let aktifSekme = 'arama';
+let favoriMap = {};
 
+const SITE_RENK = {
+  'direnc.net': '#E53935',
+  'robotistan.com': '#1976D2',
+  'robolinkmarket.com': '#388E3C',
+  'robocombo.com': '#7B1FA2',
+  'motorobit.com': '#F57C00',
+};
 
-def urun_id(urun):
-    key = urun.get("url") or (urun["site"] + urun["isim"])
-    return hashlib.md5(key.encode()).hexdigest()
-
-
-def ara_direnc(kelime):
-    base = "https://www.direnc.net"
-    url = f"{base}/arama?q={requests.utils.quote(kelime)}"
-    soup = get_soup(url)
-    if not soup:
-        return []
-    urunler = []
-    for item in soup.select(".productItem"):
-        isim_el = item.select_one("a.productDescription")
-        isim = isim_el.get_text(strip=True) if isim_el else ""
-        if not isim:
-            continue
-        fiyat_el = item.select_one(".currentPrice")
-        fiyat_metin = fiyat_el.get_text(strip=True) if fiyat_el else ""
-        href = href_to_abs(isim_el.get("href", "") if isim_el else "", base)
-        img_el = item.select_one("img.lazy")
-        img_url = (img_el.get("data-src") or img_el.get("src", "")) if img_el else ""
-        urunler.append({"site": "direnc.net", "isim": isim,
-                        "fiyat_metin": fiyat_metin, "fiyat": temizle_fiyat(fiyat_metin),
-                        "url": href, "img_url": img_url})
-    return urunler
-
-
-def ara_robotistan(kelime):
-    base = "https://www.robotistan.com"
-    url = f"{base}/arama?q={requests.utils.quote(kelime)}"
-    soup = get_soup(url)
-    if not soup:
-        return []
-    urunler = []
-    for item in soup.select(".product-item"):
-        isim_el = item.select_one("a.product-title")
-        isim = isim_el.get_text(strip=True) if isim_el else ""
-        if not isim:
-            continue
-        fiyat_el = item.select_one("strong.product-price")
-        fiyat_metin = (fiyat_el.get_text(strip=True) + " TL") if fiyat_el else ""
-        href = href_to_abs(isim_el.get("href", "") if isim_el else "", base)
-        img_el = item.select_one("img.lazyload")
-        img_url = (img_el.get("data-src") or img_el.get("src", "")) if img_el else ""
-        urunler.append({"site": "robotistan.com", "isim": isim,
-                        "fiyat_metin": fiyat_metin, "fiyat": temizle_fiyat(fiyat_metin),
-                        "url": href, "img_url": img_url})
-    return urunler
-
-
-def ara_robolinkmarket(kelime):
-    base = "https://www.robolinkmarket.com"
-    url = f"{base}/arama?q={requests.utils.quote(kelime)}"
-    soup = get_soup(url)
-    if not soup:
-        return []
-    urunler = []
-    for item in soup.select(".product-item"):
-        isim_el = item.select_one(".product-title a")
-        isim = isim_el.get_text(strip=True) if isim_el else ""
-        if not isim:
-            continue
-        fiyat_el = item.select_one(".yeni-fiyat")
-        fiyat_metin = fiyat_el.get_text(strip=True) if fiyat_el else ""
-        href = href_to_abs(isim_el.get("href", "") if isim_el else "", base)
-        img_el = item.select_one("img.lazyload")
-        img_url = (img_el.get("data-src") or "") if img_el else ""
-        if not img_url:
-            src_el = item.select_one("source")
-            img_url = src_el.get("srcset", "") if src_el else ""
-        urunler.append({"site": "robolinkmarket.com", "isim": isim,
-                        "fiyat_metin": fiyat_metin, "fiyat": temizle_fiyat(fiyat_metin),
-                        "url": href, "img_url": img_url})
-    return urunler
-
-
-def ara_motorobit(kelime):
-    base = "https://www.motorobit.com"
-    url = f"{base}/arama?q={requests.utils.quote(kelime)}"
-    soup = get_soup(url)
-    if not soup:
-        return []
-    urunler = []
-    for item in soup.select("[data-toggle='product']"):
-        link_el = item.select_one("a[data-toggle='product-url']")
-        isim = (link_el.get("title") or link_el.get_text(strip=True)) if link_el else ""
-        if not isim:
-            continue
-        fiyat_el = item.select_one(".text-primary.font-bold")
-        fiyat_metin = ""
-        if fiyat_el:
-            raw = fiyat_el.get_text(separator=" ", strip=True)
-            m = re.search(r"[\d\.,]+", raw)
-            if m:
-                fiyat_metin = m.group(0) + " TL"
-        href = href_to_abs(link_el.get("href", "") if link_el else "", base)
-        img_el = item.select_one("img[data-src], img[data-toggle='product-image']")
-        img_url = (img_el.get("data-src") or img_el.get("src", "")) if img_el else ""
-        urunler.append({"site": "motorobit.com", "isim": isim,
-                        "fiyat_metin": fiyat_metin, "fiyat": temizle_fiyat(fiyat_metin),
-                        "url": href, "img_url": img_url})
-    return urunler
-
-
-def ara_robocombo(kelime):
-    """Robocombo (Ticimax): ürün listesi /api/product/GetProductList JSON API."""
-    if not kelime or not kelime.strip():
-        return []
-    base = "https://www.robocombo.com"
-    filter_obj = {
-        "CategoryIdList": [],
-        "BrandIdList": [],
-        "SupplierIdList": [],
-        "TagIdList": [],
-        "TagId": -1,
-        "FilterObject": [],
-        "MinStockAmount": -1,
-        "IsShowcaseProduct": -1,
-        "IsOpportunityProduct": -1,
-        "FastShipping": -1,
-        "IsNewProduct": -1,
-        "IsDiscountedProduct": -1,
-        "IsShippingFree": -1,
-        "IsProductCombine": -1,
-        "MinPrice": 0,
-        "MaxPrice": 0,
-        "Point": -1,
-        "SearchKeyword": "",
-        "StrProductIds": "",
-        "IsSimilarProduct": False,
-        "RelatedProductId": 0,
-        "ProductKeyword": kelime.strip(),
-        "PageContentId": 0,
-        "StrProductIDNotEqual": "",
-        "IsVariantList": -1,
-        "IsVideoProduct": -1,
-        "ShowBlokVideo": -1,
-        "VideoSetting": {"ShowProductVideo": 0, "AutoPlayVideo": -1},
-        "ShowList": 1,
-        "VisibleImageCount": 0,
-        "ShowCounterProduct": -1,
-        "ImageSliderActive": False,
-        "ProductListPageId": 0,
-        "ShowGiftHintActive": False,
-        "IsInStock": False,
-        "IsPriceRequest": True,
-    }
-    paging = {
-        "PageItemCount": 48,
-        "PageNumber": 1,
-        "OrderBy": "KATEGORISIRA",
-        "OrderDirection": "ASC",
-    }
-    params = {
-        "FilterJson": json.dumps(filter_obj, ensure_ascii=False),
-        "PagingJson": json.dumps(paging, ensure_ascii=False),
-        "CreateFilter": "false",
-        "PageType": "10",
-        "PageId": "0",
-    }
-    try:
-        r = requests.get(
-            f"{base}/api/product/GetProductList",
-            params=params,
-            headers=HEADERS,
-            timeout=TIMEOUT,
-        )
-        r.raise_for_status()
-        data = r.json()
-    except Exception:
-        return []
-    if not isinstance(data, dict) or data.get("isError"):
-        return []
-    urunler = []
-    for p in data.get("products") or []:
-        if p.get("isBanner"):
-            continue
-        isim = (p.get("name") or "").strip()
-        if not isim:
-            continue
-        path = p.get("defaultUrl") or p.get("url") or ""
-        href = href_to_abs(path, base) if path else ""
-        img_url = p.get("imageThumbPath") or ""
-        fiyat_metin = (p.get("productCartPriceStr") or p.get("productSellPriceStr") or "").strip()
-        fiyat = p.get("productCartPrice")
-        if fiyat is None and fiyat_metin:
-            fiyat = temizle_fiyat(fiyat_metin)
-        elif fiyat is not None:
-            try:
-                fiyat = float(fiyat)
-            except (TypeError, ValueError):
-                fiyat = temizle_fiyat(fiyat_metin)
-        urunler.append({
-            "site": "robocombo.com",
-            "isim": isim,
-            "fiyat_metin": fiyat_metin,
-            "fiyat": fiyat,
-            "url": href,
-            "img_url": img_url,
-        })
-    return urunler
-
-
-SCRAPER_MAP = {
-    "direnc.net": ara_direnc,
-    "robotistan.com": ara_robotistan,
-    "robolinkmarket.com": ara_robolinkmarket,
-    "motorobit.com": ara_motorobit,
-    "robocombo.com": ara_robocombo,
+function proxyImg(url) {
+  if (!url) return '';
+  return '/proxy/img?url=' + encodeURIComponent(url);
 }
 
+document.getElementById('searchInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') aramaYap();
+});
 
-def fav_yukle():
-    if os.path.exists(FAV_DOSYA):
-        try:
-            with open(FAV_DOSYA, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
+document.querySelectorAll('.filter-chip').forEach(chip => {
+  chip.addEventListener('click', () => {
+    const cb = chip.querySelector('input');
+    cb.checked = !cb.checked;
+    chip.classList.toggle('checked', cb.checked);
+    chip.classList.toggle('unchecked', !cb.checked);
+  });
+});
 
+function seciliSiteler() {
+  return [...document.querySelectorAll('.filter-chip input:checked')]
+    .map(cb => cb.closest('.filter-chip').id.replace('chip-', ''));
+}
 
-def fav_kaydet(data):
-    with open(FAV_DOSYA, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+async function aramaYap() {
+  const kelime = document.getElementById('searchInput').value.trim();
+  if (!kelime) return;
+  const siteler = seciliSiteler();
+  if (siteler.length === 0) { alert('En az bir site seçin!'); return; }
+  sekmeDegistir('arama');
+  document.getElementById('aramaGrid').innerHTML = '';
+  document.getElementById('aramaEmpty').classList.add('hidden');
+  document.getElementById('progressBar').classList.add('loading');
+  document.getElementById('statusText').textContent = `"${kelime}" aranıyor…`;
+  document.getElementById('searchBtn').disabled = true;
+  try {
+    const params = new URLSearchParams({ q: kelime });
+    siteler.forEach(s => params.append('siteler', s));
+    const res = await fetch(`/api/ara?${params}`);
+    sonuclar = await res.json();
+    await favoriDurumlariniYukle();
+    const gercek = sonuclar.filter(r => r.fiyat != null);
+    document.getElementById('statusText').textContent =
+      `${gercek.length} ürün bulundu (${sonuclar.length} toplam)`;
+  } catch(e) {
+    sonuclar = [];
+    document.getElementById('statusText').textContent = 'Hata oluştu';
+  } finally {
+    document.getElementById('progressBar').classList.remove('loading');
+    document.getElementById('searchBtn').disabled = false;
+    siralaVeGoster();
+  }
+}
 
+function siralaVeGoster() {
+  const sort = document.getElementById('sortSelect').value;
+  let sirali = [...sonuclar];
+  if (sort === 'fiyat_asc') {
+    sirali.sort((a, b) => (a.fiyat ?? Infinity) - (b.fiyat ?? Infinity));
+  } else if (sort === 'fiyat_desc') {
+    sirali.sort((a, b) => (b.fiyat ?? -1) - (a.fiyat ?? -1));
+  } else {
+    sirali.sort((a, b) => a.site.localeCompare(b.site));
+  }
+  renderGrid(document.getElementById('aramaGrid'), sirali, 'aramaEmpty');
+}
 
-@app.route("/")
-def index():
-    return render_template("index.html")
-
-
-@app.route("/proxy/img")
-def proxy_img():
-    url = request.args.get("url", "")
-    if not url.startswith("http"):
-        return "", 400
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=8)
-        return Response(r.content, content_type=r.headers.get("Content-Type", "image/jpeg"))
-    except Exception:
-        return "", 404
-
-
-@app.route("/api/ara")
-def ara():
-    kelime = request.args.get("q", "").strip()
-    siteler = request.args.getlist("siteler")
-    if not kelime:
-        return jsonify({"error": "Arama kelimesi gerekli"}), 400
-    if not siteler:
-        siteler = list(SCRAPER_MAP.keys())
-    sonuclar = []
-    lock = threading.Lock()
-    def calistir(site_adi):
-        fn = SCRAPER_MAP.get(site_adi)
-        if fn:
-            try:
-                res = fn(kelime)
-            except Exception:
-                res = []
-            with lock:
-                sonuclar.extend(res)
-    threads = [threading.Thread(target=calistir, args=(s,), daemon=True) for s in siteler]
-    for t in threads: t.start()
-    for t in threads: t.join()
-    return jsonify(sonuclar)
-
-
-@app.route("/api/favoriler", methods=["GET"])
-def favoriler_listele():
-    data = fav_yukle()
-    return jsonify(list(data.values()))
-
-
-@app.route("/api/favoriler", methods=["POST"])
-def favori_ekle():
-    urun = request.json
-    data = fav_yukle()
-    kid = urun_id(urun)
-    data[kid] = {
-        "site": urun["site"],
-        "isim": urun["isim"],
-        "fiyat_metin": urun.get("fiyat_metin", ""),
-        "fiyat": urun.get("fiyat"),
-        "url": urun.get("url", ""),
-        "img_url": urun.get("img_url", ""),
+function renderGrid(grid, urunler, emptyId) {
+  grid.innerHTML = '';
+  if (!urunler.length) {
+    document.getElementById(emptyId).classList.remove('hidden');
+    return;
+  }
+  document.getElementById(emptyId).classList.add('hidden');
+  const fiyatlar = urunler.map(r => r.fiyat).filter(f => f != null);
+  const enUcuz = fiyatlar.length ? Math.min(...fiyatlar) : null;
+  urunler.forEach(urun => {
+    const kid = urunId(urun);
+    const isFav = !!favoriMap[kid];
+    const isEnUcuz = urun.fiyat != null && urun.fiyat === enUcuz;
+    const renk = SITE_RENK[urun.site] || '#888';
+    const imgSrc = proxyImg(urun.img_url);
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <div class="card-img-wrap">
+        ${imgSrc ? `<img class="card-img" src="${imgSrc}" alt="" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">` : ''}
+        <div class="card-img-placeholder" style="${imgSrc ? 'display:none' : ''}">📦</div>
+        <button class="fav-btn ${isFav ? 'active' : ''}" data-kid="${kid}" onclick="toggleFav(event, ${JSON.stringify(urun).replace(/"/g, '&quot;')})">
+          ${isFav ? '♥' : '♡'}
+        </button>
+      </div>
+      <div class="card-body">
+        <span class="site-badge" style="background:${renk}">${urun.site}</span>
+        <div class="card-name">${urun.isim}</div>
+        <div class="card-price-row">
+          <span class="card-price ${isEnUcuz ? 'cheapest' : ''}">${urun.fiyat_metin || '—'}</span>
+          ${isEnUcuz ? '<span class="cheapest-badge">EN UCUZ</span>' : ''}
+        </div>
+      </div>
+    `;
+    if (urun.url && urun.url.startsWith('http')) {
+      card.addEventListener('click', e => {
+        if (e.target.closest('.fav-btn')) return;
+        window.open(urun.url, '_blank');
+      });
     }
-    fav_kaydet(data)
-    return jsonify({"ok": True, "id": kid})
+    grid.appendChild(card);
+  });
+}
 
+async function favoriDurumlariniYukle() {
+  try {
+    const res = await fetch('/api/favoriler');
+    const favList = await res.json();
+    favoriMap = {};
+    favList.forEach(f => { favoriMap[urunId(f)] = f; });
+  } catch(e) {}
+}
 
-@app.route("/api/favoriler/<kid>", methods=["DELETE"])
-def favori_cikar(kid):
-    data = fav_yukle()
-    data.pop(kid, None)
-    fav_kaydet(data)
-    return jsonify({"ok": True})
+async function toggleFav(e, urun) {
+  e.stopPropagation();
+  const kid = urunId(urun);
+  const btn = e.currentTarget;
+  if (favoriMap[kid]) {
+    await fetch(`/api/favoriler/${kid}`, { method: 'DELETE' });
+    delete favoriMap[kid];
+    btn.textContent = '♡';
+    btn.classList.remove('active');
+  } else {
+    await fetch('/api/favoriler', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(urun)
+    });
+    favoriMap[kid] = urun;
+    btn.textContent = '♥';
+    btn.classList.add('active');
+  }
+  guncelFavSayac();
+  if (aktifSekme === 'favoriler') favoriGoster();
+}
 
+function urunId(urun) {
+  const key = urun.url || (urun.site + urun.isim);
+  return btoa(encodeURIComponent(key)).replace(/[^a-zA-Z0-9]/g, '').substring(0, 32);
+}
 
-@app.route("/api/favoriler/kontrol", methods=["POST"])
-def favori_kontrol():
-    urun = request.json
-    data = fav_yukle()
-    kid = urun_id(urun)
-    return jsonify({"favori": kid in data, "id": kid})
+function guncelFavSayac() {
+  const n = Object.keys(favoriMap).length;
+  const el = document.getElementById('favCount');
+  if (n > 0) {
+    el.textContent = `♥ ${n}`;
+    el.classList.remove('hidden');
+  } else {
+    el.classList.add('hidden');
+  }
+}
 
+async function favoriGoster() {
+  await favoriDurumlariniYukle();
+  try {
+    const res = await fetch('/api/favoriler');
+    const favList = await res.json();
+    document.getElementById('statusText').textContent =
+      favList.length ? `${favList.length} favori ürün` : 'Henüz favori eklemediniz';
+    renderGrid(document.getElementById('favGrid'), favList, 'favEmpty');
+  } catch(e) {}
+}
 
-if __name__ == "__main__":
-    app.run(debug=True)
+function sekmeDegistir(sekme) {
+  aktifSekme = sekme;
+  document.getElementById('tabArama').classList.toggle('active', sekme === 'arama');
+  document.getElementById('tabFavoriler').classList.toggle('active', sekme === 'favoriler');
+  document.getElementById('aramaSection').classList.toggle('hidden', sekme !== 'arama');
+  document.getElementById('favorilerSection').classList.toggle('hidden', sekme !== 'favoriler');
+  if (sekme === 'favoriler') favoriGoster();
+}
+
+(async () => {
+  await favoriDurumlariniYukle();
+  guncelFavSayac();
+})();
+</script>
+</body>
+</html>
