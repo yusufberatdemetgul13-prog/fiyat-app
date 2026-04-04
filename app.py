@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, render_template, request, jsonify, Response, session
 from werkzeug.middleware.proxy_fix import ProxyFix
 import requests
 from bs4 import BeautifulSoup
@@ -7,8 +7,11 @@ import json
 import os
 import hashlib
 import threading
+import secrets
+from functools import wraps
 
 app = Flask(__name__)
+app.secret_key = secrets.token_hex(32)  # Güvenli session key
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 HEADERS = {
@@ -22,8 +25,23 @@ HEADERS = {
 }
 TIMEOUT = 15
 FAV_DOSYA = os.path.join(os.path.dirname(__file__), "favoriler.json")
-ANON_USER_KEY = "anon"
 
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get("user_id"):
+            return jsonify({"error": "Oturum gerekli"}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+def kullanici_anahtari():
+    """Her kullanıcıya özel benzersiz ID oluşturur"""
+    user_id = session.get("user_id")
+    if not user_id:
+        user_id = hashlib.md5(secrets.token_bytes(16)).hexdigest()[:16]
+        session["user_id"] = user_id
+        session.permanent = True  # Tarayıcı kapansa bile koru
+    return user_id
 
 def temizle_fiyat(metin):
     if not metin:
@@ -31,7 +49,6 @@ def temizle_fiyat(metin):
     metin = metin.replace(".", "").replace(",", ".").strip()
     sayilar = re.findall(r"[\d.]+", metin)
     return float(sayilar[0]) if sayilar else None
-
 
 def get_soup(url):
     try:
@@ -41,25 +58,17 @@ def get_soup(url):
     except Exception:
         return None
 
-
 def href_to_abs(href, base):
     if href and not href.startswith("http"):
         return base + href
     return href or ""
 
-
 def urun_id(urun):
     key = urun.get("url") or (urun["site"] + urun["isim"])
     return hashlib.md5(key.encode("utf-8")).hexdigest()
 
-
-def kullanici_anahtari():
-    return ANON_USER_KEY
-
-
 def _bos_siteler():
     return {s: {} for s in SCRAPER_MAP.keys()}
-
 
 def fav_db_yukle():
     if not os.path.exists(FAV_DOSYA):
@@ -85,15 +94,13 @@ def fav_db_yukle():
                 by_site[site][kid] = p
             return {
                 "v": 2,
-                "users": {ANON_USER_KEY: {"profile": None, "by_site": by_site}},
+                "users": {"anon": {"profile": None, "by_site": by_site}},
             }
     return {"v": 2, "users": {}}
-
 
 def fav_db_kaydet(db):
     with open(FAV_DOSYA, "w", encoding="utf-8") as f:
         json.dump(db, f, ensure_ascii=False, indent=2)
-
 
 def kullanici_bucket_al(db, user_key):
     if user_key not in db["users"]:
@@ -105,7 +112,6 @@ def kullanici_bucket_al(db, user_key):
         if s not in u["by_site"]:
             u["by_site"][s] = {}
     return u
-
 
 def ara_direnc(kelime):
     base = "https://www.direnc.net"
@@ -129,7 +135,6 @@ def ara_direnc(kelime):
                         "url": href, "img_url": img_url})
     return urunler
 
-
 def ara_robotistan(kelime):
     base = "https://www.robotistan.com"
     url = f"{base}/arama?q={requests.utils.quote(kelime)}"
@@ -151,7 +156,6 @@ def ara_robotistan(kelime):
                         "fiyat_metin": fiyat_metin, "fiyat": temizle_fiyat(fiyat_metin),
                         "url": href, "img_url": img_url})
     return urunler
-
 
 def ara_robolinkmarket(kelime):
     base = "https://www.robolinkmarket.com"
@@ -177,7 +181,6 @@ def ara_robolinkmarket(kelime):
                         "fiyat_metin": fiyat_metin, "fiyat": temizle_fiyat(fiyat_metin),
                         "url": href, "img_url": img_url})
     return urunler
-
 
 def ara_motorobit(kelime):
     base = "https://www.motorobit.com"
@@ -205,7 +208,6 @@ def ara_motorobit(kelime):
                         "fiyat_metin": fiyat_metin, "fiyat": temizle_fiyat(fiyat_metin),
                         "url": href, "img_url": img_url})
     return urunler
-
 
 def ara_robocombo(kelime):
     if not kelime or not kelime.strip():
@@ -304,7 +306,6 @@ def ara_robocombo(kelime):
         })
     return urunler
 
-
 SCRAPER_MAP = {
     "direnc.net": ara_direnc,
     "robotistan.com": ara_robotistan,
@@ -313,11 +314,23 @@ SCRAPER_MAP = {
     "robocombo.com": ara_robocombo,
 }
 
-
 @app.route("/")
 def index():
-    return render_template("index.html", site_keys=list(SCRAPER_MAP.keys()))
+    user_key = kullanici_anahtari()
+    return render_template("index.html", 
+                         site_keys=list(SCRAPER_MAP.keys()),
+                         user_key=user_key)
 
+@app.route("/profil")
+def profil():
+    user_key = kullanici_anahtari()
+    db = fav_db_yukle()
+    bucket = kullanici_bucket_al(db, user_key)
+    return jsonify({
+        "user_id": user_key,
+        "favori_sayisi": sum(len(d) for d in bucket["by_site"].values()),
+        "by_site": bucket["by_site"]
+    })
 
 @app.route("/proxy/img")
 def proxy_img():
@@ -329,7 +342,6 @@ def proxy_img():
         return Response(r.content, content_type=r.headers.get("Content-Type", "image/jpeg"))
     except Exception:
         return "", 404
-
 
 @app.route("/api/ara")
 def ara():
@@ -361,8 +373,8 @@ def ara():
         u["id"] = urun_id(u)
     return jsonify(sonuclar)
 
-
 @app.route("/api/favoriler", methods=["GET"])
+@login_required
 def favoriler_listele():
     db = fav_db_yukle()
     uk = kullanici_anahtari()
@@ -382,8 +394,8 @@ def favoriler_listele():
         total += len(lst)
     return jsonify({"by_site": out, "counts": counts, "total": total})
 
-
 @app.route("/api/favoriler", methods=["POST"])
+@login_required
 def favori_ekle():
     urun = request.json
     if not urun or not urun.get("site"):
@@ -407,8 +419,8 @@ def favori_ekle():
     fav_db_kaydet(db)
     return jsonify({"ok": True, "id": kid})
 
-
 @app.route("/api/favoriler/<kid>", methods=["DELETE"])
+@login_required
 def favori_cikar(kid):
     db = fav_db_yukle()
     uk = kullanici_anahtari()
@@ -420,8 +432,8 @@ def favori_cikar(kid):
             return jsonify({"ok": True})
     return jsonify({"ok": False}), 404
 
-
 @app.route("/api/favoriler/kontrol", methods=["POST"])
+@login_required
 def favori_kontrol():
     urun = request.json or {}
     kid = urun.get("id") or urun_id(urun)
@@ -439,6 +451,4 @@ def favori_kontrol():
                 break
     return jsonify({"favori": fav, "id": kid})
 
-
-if __name__ == "__main__":
-    app.run(debug=True)
+if __name
