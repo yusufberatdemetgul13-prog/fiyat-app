@@ -150,11 +150,111 @@ def ara_motorobit(kelime):
     return urunler
 
 
+def ara_robocombo(kelime):
+    """Robocombo (Ticimax): ürün listesi /api/product/GetProductList JSON API."""
+    if not kelime or not kelime.strip():
+        return []
+    base = "https://www.robocombo.com"
+    filter_obj = {
+        "CategoryIdList": [],
+        "BrandIdList": [],
+        "SupplierIdList": [],
+        "TagIdList": [],
+        "TagId": -1,
+        "FilterObject": [],
+        "MinStockAmount": -1,
+        "IsShowcaseProduct": -1,
+        "IsOpportunityProduct": -1,
+        "FastShipping": -1,
+        "IsNewProduct": -1,
+        "IsDiscountedProduct": -1,
+        "IsShippingFree": -1,
+        "IsProductCombine": -1,
+        "MinPrice": 0,
+        "MaxPrice": 0,
+        "Point": -1,
+        "SearchKeyword": "",
+        "StrProductIds": "",
+        "IsSimilarProduct": False,
+        "RelatedProductId": 0,
+        "ProductKeyword": kelime.strip(),
+        "PageContentId": 0,
+        "StrProductIDNotEqual": "",
+        "IsVariantList": -1,
+        "IsVideoProduct": -1,
+        "ShowBlokVideo": -1,
+        "VideoSetting": {"ShowProductVideo": 0, "AutoPlayVideo": -1},
+        "ShowList": 1,
+        "VisibleImageCount": 0,
+        "ShowCounterProduct": -1,
+        "ImageSliderActive": False,
+        "ProductListPageId": 0,
+        "ShowGiftHintActive": False,
+        "IsInStock": False,
+        "IsPriceRequest": True,
+    }
+    paging = {
+        "PageItemCount": 48,
+        "PageNumber": 1,
+        "OrderBy": "KATEGORISIRA",
+        "OrderDirection": "ASC",
+    }
+    params = {
+        "FilterJson": json.dumps(filter_obj, ensure_ascii=False),
+        "PagingJson": json.dumps(paging, ensure_ascii=False),
+        "CreateFilter": "false",
+        "PageType": "10",
+        "PageId": "0",
+    }
+    try:
+        r = requests.get(
+            f"{base}/api/product/GetProductList",
+            params=params,
+            headers=HEADERS,
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        return []
+    if not isinstance(data, dict) or data.get("isError"):
+        return []
+    urunler = []
+    for p in data.get("products") or []:
+        if p.get("isBanner"):
+            continue
+        isim = (p.get("name") or "").strip()
+        if not isim:
+            continue
+        path = p.get("defaultUrl") or p.get("url") or ""
+        href = href_to_abs(path, base) if path else ""
+        img_url = p.get("imageThumbPath") or ""
+        fiyat_metin = (p.get("productCartPriceStr") or p.get("productSellPriceStr") or "").strip()
+        fiyat = p.get("productCartPrice")
+        if fiyat is None and fiyat_metin:
+            fiyat = temizle_fiyat(fiyat_metin)
+        elif fiyat is not None:
+            try:
+                fiyat = float(fiyat)
+            except (TypeError, ValueError):
+                fiyat = temizle_fiyat(fiyat_metin)
+        urunler.append({
+            "site": "robocombo.com",
+            "isim": isim,
+            "fiyat_metin": fiyat_metin,
+            "fiyat": fiyat,
+            "url": href,
+            "img_url": img_url,
+        })
+    return urunler
+
+
 SCRAPER_MAP = {
     "direnc.net": ara_direnc,
     "robotistan.com": ara_robotistan,
     "robolinkmarket.com": ara_robolinkmarket,
     "motorobit.com": ara_motorobit,
+    "robocombo.com": ara_robocombo,
 }
 
 
