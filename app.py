@@ -209,3 +209,13 @@ def ara_robocombo(kelime):
         "IsProductCombine": -1, "MinPrice": 0, "MaxPrice": 0, "Point": -1,
         "SearchKeyword": "", "StrProductIds": "", "IsSimilarProduct": False,
         "RelatedProductId":
+@app.route('/sitemap.xml')
+def sitemap():
+    xml = '''<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://komponentx.com/</loc>
+    <priority>1.0</priority>
+  </url>
+</urlset>'''
+    return Response(xml, mimetype='application/xml')
