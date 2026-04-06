@@ -1,4 +1,5 @@
-from flask import Flask, render_template, request, jsonify, Response
+# app.py
+from flask import Flask, render_template, request, jsonify, Response, send_from_directory
 import requests
 from bs4 import BeautifulSoup
 import re
@@ -8,7 +9,7 @@ import hashlib
 import threading
 from datetime import datetime
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static', template_folder='templates')
 
 HEADERS = {
     "User-Agent": (
@@ -21,6 +22,7 @@ HEADERS = {
 }
 TIMEOUT = 15
 FAV_DOSYA = os.path.join(os.path.dirname(__file__), "favoriler.json")
+FAV_LOCK = threading.Lock()
 
 
 def temizle_fiyat(metin):
@@ -28,7 +30,10 @@ def temizle_fiyat(metin):
         return None
     metin = metin.replace(".", "").replace(",", ".").strip()
     sayilar = re.findall(r"[\d.]+", metin)
-    return float(sayilar[0]) if sayilar else None
+    try:
+        return float(sayilar[0]) if sayilar else None
+    except Exception:
+        return None
 
 
 def get_soup(url):
@@ -45,14 +50,16 @@ def href_to_abs(href, base):
         return ""
     if href.startswith("http"):
         return href
-    # ensure base ends without trailing slash if href starts with '/'
     if href.startswith("/"):
         return base.rstrip("/") + href
     return base.rstrip("/") + "/" + href.lstrip("/")
 
 
-def urun_id(urun):
-    key = urun.get("url") or (urun["site"] + urun["isim"])
+def urun_key_from(urun):
+    return urun.get("url") or (urun.get("site", "") + urun.get("isim", ""))
+
+
+def urun_id_from_key(key):
     return hashlib.md5(key.encode()).hexdigest()
 
 
@@ -156,7 +163,6 @@ def ara_motorobit(kelime):
     return urunler
 
 
-# Yeni: robocombo için scraper
 def ara_robocombo(kelime):
     base = "https://www.robocombo.com"
     url = f"{base}/arama?q={requests.utils.quote(kelime)}"
@@ -164,10 +170,8 @@ def ara_robocombo(kelime):
     if not soup:
         return []
     urunler = []
-    # sayfa yapısı farklı olabilir; birkaç farklı selector denemesi yapıyoruz
     items = soup.select(".product-item, .product, .productCard, .item")
     if not items:
-        # fallback: linkleri tarayıp ürün başlıklarını al
         for a in soup.select("a"):
             title = a.get("title") or a.get_text(strip=True)
             href = a.get("href", "")
@@ -202,7 +206,7 @@ SCRAPER_MAP = {
     "robotistan.com": ara_robotistan,
     "robolinkmarket.com": ara_robolinkmarket,
     "motorobit.com": ara_motorobit,
-    "robocombo.com": ara_robocombo,  # eklendi
+    "robocombo.com": ara_robocombo,
 }
 
 
@@ -217,8 +221,9 @@ def fav_yukle():
 
 
 def fav_kaydet(data):
-    with open(FAV_DOSYA, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    with FAV_LOCK:
+        with open(FAV_DOSYA, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 @app.route("/")
@@ -248,6 +253,7 @@ def ara():
         siteler = list(SCRAPER_MAP.keys())
     sonuclar = []
     lock = threading.Lock()
+
     def calistir(site_adi):
         fn = SCRAPER_MAP.get(site_adi)
         if fn:
@@ -257,76 +263,98 @@ def ara():
                 res = []
             with lock:
                 sonuclar.extend(res)
+
     threads = [threading.Thread(target=calistir, args=(s,), daemon=True) for s in siteler]
-    for t in threads: t.start()
-    for t in threads: t.join()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
     return jsonify(sonuclar)
 
 
+# Favoriler: cihaz bazlı
 @app.route("/api/favoriler", methods=["GET"])
 def favoriler_listele():
+    device_id = request.args.get("device_id", "").strip()
+    if not device_id:
+        return jsonify({"error": "device_id gerekli"}), 400
     data = fav_yukle()
-    return jsonify(list(data.values()))
+    device_map = data.get(device_id, {})
+    # döndür: liste halinde
+    return jsonify(list(device_map.values()))
 
 
 @app.route("/api/favoriler", methods=["POST"])
 def favori_ekle():
-    urun = request.json
-    data = fav_yukle()
-    kid = urun_id(urun)
-    data[kid] = {
-        "site": urun["site"],
-        "isim": urun["isim"],
-        "fiyat_metin": urun.get("fiyat_metin", ""),
-        "fiyat": urun.get("fiyat"),
-        "url": urun.get("url", ""),
-        "img_url": urun.get("img_url", ""),
+    payload = request.json or {}
+    device_id = payload.get("device_id") or request.args.get("device_id")
+    if not device_id:
+        return jsonify({"error": "device_id gerekli"}), 400
+    urun = {
+        "site": payload.get("site", ""),
+        "isim": payload.get("isim", ""),
+        "fiyat_metin": payload.get("fiyat_metin", ""),
+        "fiyat": payload.get("fiyat"),
+        "url": payload.get("url", ""),
+        "img_url": payload.get("img_url", ""),
     }
-    fav_kaydet(data)
-    return jsonify({"ok": True, "id": kid})
+    key = urun_key_from(urun)
+    kid = urun_id_from_key(key)
+    with FAV_LOCK:
+        data = fav_yukle()
+        device_map = data.setdefault(device_id, {})
+        device_map[key] = {"id": kid, **urun}
+        fav_kaydet(data)
+    return jsonify({"ok": True, "id": kid, "key": key})
 
 
-@app.route("/api/favoriler/<kid>", methods=["DELETE"])
-def favori_cikar(kid):
-    data = fav_yukle()
-    data.pop(kid, None)
-    fav_kaydet(data)
+@app.route("/api/favoriler", methods=["DELETE"])
+def favori_cikar():
+    device_id = request.args.get("device_id", "").strip()
+    key = request.args.get("key", "").strip()
+    if not device_id or not key:
+        return jsonify({"error": "device_id ve key gerekli"}), 400
+    with FAV_LOCK:
+        data = fav_yukle()
+        device_map = data.get(device_id, {})
+        if key in device_map:
+            device_map.pop(key, None)
+            data[device_id] = device_map
+            fav_kaydet(data)
     return jsonify({"ok": True})
 
 
 @app.route("/api/favoriler/kontrol", methods=["POST"])
 def favori_kontrol():
-    urun = request.json
+    payload = request.json or {}
+    device_id = payload.get("device_id")
+    urun = payload.get("urun") or {}
+    if not device_id:
+        return jsonify({"error": "device_id gerekli"}), 400
+    key = urun.get("url") or (urun.get("site", "") + urun.get("isim", ""))
     data = fav_yukle()
-    kid = urun_id(urun)
-    return jsonify({"favori": kid in data, "id": kid})
+    device_map = data.get(device_id, {})
+    exists = key in device_map
+    return jsonify({"favori": exists, "key": key, "id": device_map.get(key, {}).get("id")})
 
 
-# Yeni rota: sitemap.xml
+# sitemap
 @app.route("/sitemap.xml")
 def sitemap():
     base_url = request.url_root.rstrip("/")
     urls = []
-    # Kök sayfa
     urls.append({"loc": base_url + "/", "lastmod": datetime.utcnow().date().isoformat(), "changefreq": "daily", "priority": "1.0"})
-    # Örnek arama sayfası (isteğe bağlı)
     urls.append({"loc": base_url + "/?q=", "lastmod": datetime.utcnow().date().isoformat(), "changefreq": "weekly", "priority": "0.5"})
-    # Favorilerdeki ürünler
     favs = fav_yukle()
-    for v in favs.values():
-        url = v.get("url")
-        if url:
-            # Eğer favorideki url tam bir dış URL ise sitemap'a eklemek isteğe bağlıdır.
-            # Burada sadece kendi site içi yollar ekleniyor; dış URL'leri de eklemek istersen true yap.
-            if url.startswith("http"):
-                # dış URL eklemek istersen aşağıdaki satırı kullan; şu an ekliyoruz
-                urls.append({"loc": url, "lastmod": datetime.utcnow().date().isoformat(), "changefreq": "monthly", "priority": "0.6"})
-            else:
-                urls.append({"loc": base_url + url, "lastmod": datetime.utcnow().date().isoformat(), "changefreq": "monthly", "priority": "0.6"})
-    # XML oluştur
-    xml_items = []
-    xml_items.append('<?xml version="1.0" encoding="UTF-8"?>')
-    xml_items.append('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">')
+    for device_map in favs.values():
+        for v in device_map.values():
+            url = v.get("url")
+            if url:
+                if url.startswith("http"):
+                    urls.append({"loc": url, "lastmod": datetime.utcnow().date().isoformat(), "changefreq": "monthly", "priority": "0.6"})
+                else:
+                    urls.append({"loc": base_url + url, "lastmod": datetime.utcnow().date().isoformat(), "changefreq": "monthly", "priority": "0.6"})
+    xml_items = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
     for u in urls:
         xml_items.append("  <url>")
         xml_items.append(f"    <loc>{u['loc']}</loc>")
