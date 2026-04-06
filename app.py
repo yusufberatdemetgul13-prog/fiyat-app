@@ -1,16 +1,21 @@
-# app.py
-from flask import Flask, render_template, request, jsonify, Response
+"""
+Elektronik Ürün Fiyat Karşılaştırma — Trendyol tarzı kart UI
+"""
+
+import tkinter as tk
+from tkinter import ttk, messagebox
+import threading
+import webbrowser
+import re
+import io
+
 import requests
 from bs4 import BeautifulSoup
-import re
-import json
-import os
-import hashlib
-import threading
-from datetime import datetime
-from urllib.parse import urljoin
+from PIL import Image, ImageTk, ImageDraw, ImageFont
 
-app = Flask(__name__, static_folder='static', template_folder='templates')
+# ---------------------------------------------------------------------------
+# Sabitler
+# ---------------------------------------------------------------------------
 
 HEADERS = {
     "User-Agent": (
@@ -22,22 +27,50 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 TIMEOUT = 15
-FAV_DOSYA = os.path.join(os.path.dirname(__file__), "favoriler.json")
-FAV_LOCK = threading.Lock()
+CARD_W = 210
+CARD_H = 310
+IMG_W, IMG_H = 180, 160
+COLS = 5   # başlangıç sütun sayısı (pencere genişliğine göre değişir)
+
+RENK = {
+    "bg":        "#F3F3F3",
+    "header":    "#FF6000",
+    "card":      "#FFFFFF",
+    "card_hov":  "#FFF5EE",
+    "isim":      "#1D1D1D",
+    "fiyat":     "#FF6000",
+    "site":      "#888888",
+    "badge_bg":  "#FF6000",
+    "badge_fg":  "#FFFFFF",
+    "en_ucuz":   "#00A650",
+    "border":    "#E8E8E8",
+    "input_bg":  "#FFFFFF",
+    "btn_bg":    "#FF6000",
+    "btn_fg":    "#FFFFFF",
+    "text_gray": "#666666",
+    "placeholder_bg": "#F0F0F0",
+}
+
+PLACEHOLDER_IMG: ImageTk.PhotoImage | None = None   # global placeholder
 
 
-def temizle_fiyat(metin):
+def _make_placeholder() -> ImageTk.PhotoImage:
+    img = Image.new("RGB", (IMG_W, IMG_H), RENK["placeholder_bg"])
+    draw = ImageDraw.Draw(img)
+    draw.text((IMG_W // 2 - 20, IMG_H // 2 - 8), "Yükleniyor…",
+              fill="#AAAAAA")
+    return ImageTk.PhotoImage(img)
+
+
+def temizle_fiyat(metin: str) -> float:
     if not metin:
-        return None
+        return float("inf")
     metin = metin.replace(".", "").replace(",", ".").strip()
-    m = re.search(r"[\d\.]+", metin)
-    try:
-        return float(m.group(0)) if m else None
-    except Exception:
-        return None
+    sayilar = re.findall(r"[\d.]+", metin)
+    return float(sayilar[0]) if sayilar else float("inf")
 
 
-def get_soup(url):
+def get_soup(url: str):
     try:
         r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
         r.encoding = r.apparent_encoding
@@ -46,439 +79,473 @@ def get_soup(url):
         return None
 
 
-def href_to_abs(href, base):
-    if not href:
-        return ""
-    if href.startswith("http"):
-        return href
-    if href.startswith("/"):
-        return base.rstrip("/") + href
-    return base.rstrip("/") + "/" + href.lstrip("/")
-
-
-def urun_key_from(urun):
-    return urun.get("url") or (urun.get("site", "") + urun.get("isim", ""))
-
-
-def urun_id_from_key(key):
-    return hashlib.md5(key.encode()).hexdigest()
-
-
-# --- Scrapers for each site (direnc, robotistan, robolinkmarket, motorobit, robocombo) ---
-
-def ara_direnc(kelime):
-    base = "https://www.direnc.net"
-    url = f"{base}/arama?q={requests.utils.quote(kelime)}"
-    soup = get_soup(url)
-    if not soup:
-        return []
-    urunler = []
-    for item in soup.select(".productItem"):
-        isim_el = item.select_one("a.productDescription")
-        isim = isim_el.get_text(strip=True) if isim_el else ""
-        if not isim:
-            continue
-        fiyat_el = item.select_one(".currentPrice")
-        fiyat_metin = fiyat_el.get_text(strip=True) if fiyat_el else ""
-        href = href_to_abs(isim_el.get("href", "") if isim_el else "", base)
-        img_el = item.select_one("img.lazy")
-        img_url = (img_el.get("data-src") or img_el.get("src", "")) if img_el else ""
-        urunler.append({"site": "direnc.net", "isim": isim,
-                        "fiyat_metin": fiyat_metin, "fiyat": temizle_fiyat(fiyat_metin),
-                        "url": href, "img_url": img_url})
-    return urunler
-
-
-def ara_robotistan(kelime):
-    base = "https://www.robotistan.com"
-    url = f"{base}/arama?q={requests.utils.quote(kelime)}"
-    soup = get_soup(url)
-    if not soup:
-        return []
-    urunler = []
-    for item in soup.select(".product-item"):
-        isim_el = item.select_one("a.product-title")
-        isim = isim_el.get_text(strip=True) if isim_el else ""
-        if not isim:
-            continue
-        fiyat_el = item.select_one("strong.product-price")
-        fiyat_metin = (fiyat_el.get_text(strip=True) + " TL") if fiyat_el else ""
-        href = href_to_abs(isim_el.get("href", "") if isim_el else "", base)
-        img_el = item.select_one("img.lazyload")
-        img_url = (img_el.get("data-src") or img_el.get("src", "")) if img_el else ""
-        urunler.append({"site": "robotistan.com", "isim": isim,
-                        "fiyat_metin": fiyat_metin, "fiyat": temizle_fiyat(fiyat_metin),
-                        "url": href, "img_url": img_url})
-    return urunler
-
-
-def ara_robolinkmarket(kelime):
-    base = "https://www.robolinkmarket.com"
-    url = f"{base}/arama?q={requests.utils.quote(kelime)}"
-    soup = get_soup(url)
-    if not soup:
-        return []
-    urunler = []
-    for item in soup.select(".product-item"):
-        isim_el = item.select_one(".product-title a")
-        isim = isim_el.get_text(strip=True) if isim_el else ""
-        if not isim:
-            continue
-        fiyat_el = item.select_one(".yeni-fiyat")
-        fiyat_metin = fiyat_el.get_text(strip=True) if fiyat_el else ""
-        href = href_to_abs(isim_el.get("href", "") if isim_el else "", base)
-        img_el = item.select_one("img.lazyload")
-        img_url = (img_el.get("data-src") or "") if img_el else ""
-        if not img_url:
-            src_el = item.select_one("source")
-            img_url = src_el.get("srcset", "") if src_el else ""
-        urunler.append({"site": "robolinkmarket.com", "isim": isim,
-                        "fiyat_metin": fiyat_metin, "fiyat": temizle_fiyat(fiyat_metin),
-                        "url": href, "img_url": img_url})
-    return urunler
-
-
-def ara_motorobit(kelime):
-    base = "https://www.motorobit.com"
-    url = f"{base}/arama?q={requests.utils.quote(kelime)}"
-    soup = get_soup(url)
-    if not soup:
-        return []
-    urunler = []
-    for item in soup.select("[data-toggle='product']"):
-        link_el = item.select_one("a[data-toggle='product-url']")
-        isim = (link_el.get("title") or link_el.get_text(strip=True)) if link_el else ""
-        if not isim:
-            continue
-        fiyat_el = item.select_one(".text-primary.font-bold")
-        fiyat_metin = ""
-        if fiyat_el:
-            raw = fiyat_el.get_text(separator=" ", strip=True)
-            m = re.search(r"[\d\.,]+", raw)
-            if m:
-                fiyat_metin = m.group(0) + " TL"
-        href = href_to_abs(link_el.get("href", "") if link_el else "", base)
-        img_el = item.select_one("img[data-src], img[data-toggle='product-image']")
-        img_url = (img_el.get("data-src") or img_el.get("src", "")) if img_el else ""
-        urunler.append({"site": "motorobit.com", "isim": isim,
-                        "fiyat_metin": fiyat_metin, "fiyat": temizle_fiyat(fiyat_metin),
-                        "url": href, "img_url": img_url})
-    return urunler
-
-
-# --- Enhanced robocombo scraper (tries ld+json, inline state, discovered endpoints, fallback selectors) ---
-def ara_robocombo(kelime):
-    base = "https://www.robocombo.com"
-    url = f"{base}/arama?q={requests.utils.quote(kelime)}"
+def indir_gorsel(url: str) -> ImageTk.PhotoImage | None:
     try:
-        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        img = Image.open(io.BytesIO(r.content)).convert("RGB")
+        img.thumbnail((IMG_W, IMG_H), Image.LANCZOS)
+        # beyaz arkaplan üzerine ortala
+        canvas = Image.new("RGB", (IMG_W, IMG_H), "white")
+        ox = (IMG_W - img.width) // 2
+        oy = (IMG_H - img.height) // 2
+        canvas.paste(img, (ox, oy))
+        return ImageTk.PhotoImage(canvas)
     except Exception:
-        return []
-    if r.status_code != 200:
-        return []
-    soup = BeautifulSoup(r.text, "html.parser")
+        return None
 
-    # 1) ld+json
-    items = []
-    for s in soup.select('script[type="application/ld+json"]'):
-        try:
-            data = json.loads(s.string or "{}")
-        except Exception:
-            continue
-        if isinstance(data, dict):
-            data = [data]
-        for d in data:
-            if not isinstance(d, dict):
+
+def _href_to_abs(href: str, base: str) -> str:
+    if href and not href.startswith("http"):
+        return base + href
+    return href or ""
+
+
+# ---------------------------------------------------------------------------
+# Scrapers
+# ---------------------------------------------------------------------------
+
+class DirencNetScraper:
+    site_adi = "direnc.net"
+    base_url = "https://www.direnc.net"
+
+    def ara(self, kelime):
+        url = f"{self.base_url}/arama?q={requests.utils.quote(kelime)}"
+        soup = get_soup(url)
+        if not soup:
+            return []
+        urunler = []
+        for item in soup.select(".productItem"):
+            isim_el = item.select_one("a.productDescription")
+            isim = isim_el.get_text(strip=True) if isim_el else ""
+            if not isim:
                 continue
-            if d.get("@type") in ("Product", "Offer") or "offers" in d:
-                name = d.get("name") or d.get("headline") or ""
-                offers = d.get("offers") or {}
-                price = None
-                price_text = ""
-                if isinstance(offers, dict):
-                    price = offers.get("price")
-                    price_text = (offers.get("priceCurrency", "") + " " + str(price)).strip()
-                image = d.get("image") or ""
-                link = d.get("url") or ""
-                items.append({"site": "robocombo.com", "isim": name,
-                              "fiyat_metin": price_text, "fiyat": float(price) if price else None,
-                              "url": link, "img_url": image})
-    if items:
-        return items
-
-    # 2) inline global state
-    scripts_text = "".join([s.string or "" for s in soup.select("script")])
-    m = re.search(r'(window\.__INITIAL_STATE__|__INITIAL_STATE__|window\.__DATA__|__DATA__)\s*=\s*({.+?});', scripts_text, re.S)
-    if m:
-        js = m.group(2)
-        try:
-            data = json.loads(js)
-        except Exception:
-            try:
-                js2 = re.sub(r'(\w+):', r'"\1":', js)
-                data = json.loads(js2)
-            except Exception:
-                data = None
-        if data:
-            found = []
-            def walk(o):
-                if isinstance(o, dict):
-                    for v in o.values():
-                        walk(v)
-                elif isinstance(o, list):
-                    for el in o:
-                        if isinstance(el, dict):
-                            name = el.get("name") or el.get("title") or el.get("productName") or ""
-                            price = el.get("price") or (el.get("offers", {}).get("price") if isinstance(el.get("offers"), dict) else None)
-                            img = el.get("image") or el.get("img") or ""
-                            link = el.get("url") or el.get("link") or ""
-                            if name:
-                                found.append({"site": "robocombo.com", "isim": name,
-                                              "fiyat_metin": str(price) if price else "", "fiyat": float(price) if price else None,
-                                              "url": urljoin(base, link) if link else "", "img_url": img})
-                            else:
-                                walk(el)
-            walk(data)
-            if found:
-                return found
-
-    # 3) discover API endpoints in scripts and try them
-    endpoints = set()
-    for mm in re.finditer(r'["\'](\/[a-zA-Z0-9_\-\/]*?(?:api|search|arama|products|product|catalog)[a-zA-Z0-9_\-\/]*?)["\']', r.text):
-        endpoints.add(urljoin(base, mm.group(1)))
-    for mm in re.finditer(r'["\'](https?:\/\/[^"\']*?(?:api|search|arama|products|product|catalog)[^"\']*)["\']', r.text):
-        endpoints.add(mm.group(1))
-    for ep in endpoints:
-        try:
-            rr = requests.get(ep, params={"q": kelime}, headers=HEADERS, timeout=8)
-            if rr.status_code != 200:
-                rr = requests.post(ep, json={"q": kelime}, headers=HEADERS, timeout=8)
-            if rr.status_code == 200:
-                try:
-                    data = rr.json()
-                except Exception:
-                    data = None
-                if isinstance(data, dict):
-                    for key in ("items", "products", "data", "results", "hits"):
-                        if key in data and isinstance(data[key], list):
-                            found = []
-                            for el in data[key]:
-                                if not isinstance(el, dict):
-                                    continue
-                                name = el.get("name") or el.get("title") or el.get("productName") or ""
-                                price = el.get("price") or (el.get("offers", {}).get("price") if isinstance(el.get("offers"), dict) else None)
-                                img = el.get("image") or el.get("img") or ""
-                                link = el.get("url") or el.get("link") or ""
-                                if name:
-                                    found.append({"site": "robocombo.com", "isim": name,
-                                                  "fiyat_metin": str(price) if price else "", "fiyat": float(price) if price else None,
-                                                  "url": urljoin(base, link) if link else "", "img_url": img})
-                            if found:
-                                return found
-                elif isinstance(data, list):
-                    found = []
-                    for el in data:
-                        if isinstance(el, dict):
-                            name = el.get("name") or el.get("title") or ""
-                            price = el.get("price")
-                            img = el.get("image") or ""
-                            link = el.get("url") or ""
-                            if name:
-                                found.append({"site": "robocombo.com", "isim": name,
-                                              "fiyat_metin": str(price) if price else "", "fiyat": float(price) if price else None,
-                                              "url": urljoin(base, link) if link else "", "img_url": img})
-                    if found:
-                        return found
-        except Exception:
-            continue
-
-    # 4) fallback: HTML selectors
-    fallback = []
-    for item in soup.select(".product-item, .product, .productCard, .item, .product-list-item, .product-card"):
-        isim_el = item.select_one("a.product-title, a.title, .product-title a, .title a, h2 a, h3 a, a")
-        if not isim_el:
-            continue
-        isim = isim_el.get_text(strip=True)
-        fiyat_el = item.select_one(".price, .product-price, .price-new, .price-current, .price-amount")
-        fiyat_metin = fiyat_el.get_text(strip=True) if fiyat_el else ""
-        href = isim_el.get("href") or ""
-        img_el = item.select_one("img, .product-image img")
-        img_url = (img_el.get("data-src") or img_el.get("src")) if img_el else ""
-        fallback.append({"site": "robocombo.com", "isim": isim,
-                         "fiyat_metin": fiyat_metin, "fiyat": None if not fiyat_metin else temizle_fiyat(fiyat_metin),
-                         "url": urljoin(base, href), "img_url": img_url})
-    return fallback
+            fiyat_el = item.select_one(".currentPrice")
+            fiyat_metin = fiyat_el.get_text(strip=True) if fiyat_el else ""
+            href = _href_to_abs(isim_el.get("href", "") if isim_el else "", self.base_url)
+            img_el = item.select_one("img.lazy")
+            img_url = (img_el.get("data-src") or img_el.get("src", "")) if img_el else ""
+            urunler.append({"site": self.site_adi, "isim": isim,
+                            "fiyat_metin": fiyat_metin, "fiyat": temizle_fiyat(fiyat_metin),
+                            "url": href, "img_url": img_url})
+        return urunler
 
 
-SCRAPER_MAP = {
-    "direnc.net": ara_direnc,
-    "robotistan.com": ara_robotistan,
-    "robolinkmarket.com": ara_robolinkmarket,
-    "motorobit.com": ara_motorobit,
-    "robocombo.com": ara_robocombo,
+class RobotistanScraper:
+    site_adi = "robotistan.com"
+    base_url = "https://www.robotistan.com"
+
+    def ara(self, kelime):
+        url = f"{self.base_url}/arama?q={requests.utils.quote(kelime)}"
+        soup = get_soup(url)
+        if not soup:
+            return []
+        urunler = []
+        for item in soup.select(".product-item"):
+            isim_el = item.select_one("a.product-title")
+            isim = isim_el.get_text(strip=True) if isim_el else ""
+            if not isim:
+                continue
+            fiyat_el = item.select_one("strong.product-price")
+            fiyat_metin = (fiyat_el.get_text(strip=True) + " TL") if fiyat_el else ""
+            href = _href_to_abs(isim_el.get("href", "") if isim_el else "", self.base_url)
+            img_el = item.select_one("img.lazyload")
+            img_url = (img_el.get("data-src") or img_el.get("src", "")) if img_el else ""
+            urunler.append({"site": self.site_adi, "isim": isim,
+                            "fiyat_metin": fiyat_metin, "fiyat": temizle_fiyat(fiyat_metin),
+                            "url": href, "img_url": img_url})
+        return urunler
+
+
+class RobolinkMarketScraper:
+    site_adi = "robolinkmarket.com"
+    base_url = "https://www.robolinkmarket.com"
+
+    def ara(self, kelime):
+        url = f"{self.base_url}/arama?q={requests.utils.quote(kelime)}"
+        soup = get_soup(url)
+        if not soup:
+            return []
+        urunler = []
+        for item in soup.select(".product-item"):
+            isim_el = item.select_one(".product-title a")
+            isim = isim_el.get_text(strip=True) if isim_el else ""
+            if not isim:
+                continue
+            fiyat_el = item.select_one(".yeni-fiyat")
+            fiyat_metin = fiyat_el.get_text(strip=True) if fiyat_el else ""
+            href = _href_to_abs(isim_el.get("href", "") if isim_el else "", self.base_url)
+            img_el = item.select_one("img.lazyload")
+            img_url = (img_el.get("data-src") or "") if img_el else ""
+            if not img_url:
+                src_el = item.select_one("source")
+                img_url = src_el.get("srcset", "") if src_el else ""
+            urunler.append({"site": self.site_adi, "isim": isim,
+                            "fiyat_metin": fiyat_metin, "fiyat": temizle_fiyat(fiyat_metin),
+                            "url": href, "img_url": img_url})
+        return urunler
+
+
+class RobocomboScraper:
+    site_adi = "robocombo.com"
+    base_url = "https://www.robocombo.com"
+
+    def ara(self, kelime):
+        url = f"{self.base_url}/arama?q={requests.utils.quote(kelime)}"
+        return [{"site": self.site_adi,
+                 "isim": "Tarayıcıda ara: robocombo.com",
+                 "fiyat_metin": "—", "fiyat": float("inf"),
+                 "url": url, "img_url": ""}]
+
+
+class MotorobitScraper:
+    site_adi = "motorobit.com"
+    base_url = "https://www.motorobit.com"
+
+    def ara(self, kelime):
+        url = f"{self.base_url}/arama?q={requests.utils.quote(kelime)}"
+        soup = get_soup(url)
+        if not soup:
+            return []
+        urunler = []
+        for item in soup.select("[data-toggle='product']"):
+            link_el = item.select_one("a[data-toggle='product-url']")
+            isim = (link_el.get("title") or link_el.get_text(strip=True)) if link_el else ""
+            if not isim:
+                continue
+            fiyat_el = item.select_one(".text-primary.font-bold")
+            fiyat_metin = ""
+            if fiyat_el:
+                raw = fiyat_el.get_text(separator=" ", strip=True)
+                m = re.search(r"[\d\.,]+", raw)
+                if m:
+                    fiyat_metin = m.group(0) + " TL"
+            href = _href_to_abs(link_el.get("href", "") if link_el else "", self.base_url)
+            img_el = item.select_one("img[data-src], img[data-toggle='product-image']")
+            img_url = (img_el.get("data-src") or img_el.get("src", "")) if img_el else ""
+            urunler.append({"site": self.site_adi, "isim": isim,
+                            "fiyat_metin": fiyat_metin, "fiyat": temizle_fiyat(fiyat_metin),
+                            "url": href, "img_url": img_url})
+        return urunler
+
+
+SCRAPERS = [
+    DirencNetScraper(),
+    RobotistanScraper(),
+    RobolinkMarketScraper(),
+    RobocomboScraper(),
+    MotorobitScraper(),
+]
+
+SITE_RENK = {
+    "direnc.net":        "#E53935",
+    "robotistan.com":    "#1976D2",
+    "robolinkmarket.com":"#388E3C",
+    "robocombo.com":     "#7B1FA2",
+    "motorobit.com":     "#F57C00",
 }
 
+# ---------------------------------------------------------------------------
+# Ürün Kartı Widget
+# ---------------------------------------------------------------------------
 
-# --- Favorites (device-based) storage helpers ---
-def fav_yukle():
-    if os.path.exists(FAV_DOSYA):
-        try:
-            with open(FAV_DOSYA, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
+class UrunKarti(tk.Frame):
+    def __init__(self, parent, urun: dict, en_ucuz_fiyat: float, **kwargs):
+        super().__init__(parent, bg=RENK["card"], bd=0,
+                         highlightthickness=1,
+                         highlightbackground=RENK["border"],
+                         cursor="hand2", **kwargs)
+        self.urun = urun
+        self._build(en_ucuz_fiyat)
+        self.bind("<Button-1>", self._ac)
+        self.bind("<Enter>", self._hover_on)
+        self.bind("<Leave>", self._hover_off)
+        for child in self.winfo_children():
+            child.bind("<Button-1>", self._ac)
+            child.bind("<Enter>", self._hover_on)
+            child.bind("<Leave>", self._hover_off)
 
+    def _build(self, en_ucuz_fiyat):
+        global PLACEHOLDER_IMG
+        if PLACEHOLDER_IMG is None:
+            PLACEHOLDER_IMG = _make_placeholder()
 
-def fav_kaydet(data):
-    with FAV_LOCK:
-        with open(FAV_DOSYA, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        # --- Görsel ---
+        self.img_label = tk.Label(self, image=PLACEHOLDER_IMG,
+                                  bg=RENK["card"], width=IMG_W, height=IMG_H)
+        self.img_label.pack(pady=(10, 4))
+        self.img_label.bind("<Button-1>", self._ac)
+        self.img_label.bind("<Enter>", self._hover_on)
+        self.img_label.bind("<Leave>", self._hover_off)
 
+        # --- Site badge ---
+        site_renk = SITE_RENK.get(self.urun["site"], "#888")
+        badge = tk.Label(self, text=self.urun["site"],
+                         bg=site_renk, fg="white",
+                         font=("Segoe UI", 7, "bold"),
+                         padx=5, pady=1)
+        badge.pack(anchor="w", padx=10)
 
-# --- Routes ---
-@app.route("/")
-def index():
-    return render_template("index.html")
+        # --- İsim ---
+        isim = self.urun["isim"]
+        if len(isim) > 55:
+            isim = isim[:52] + "…"
+        tk.Label(self, text=isim, bg=RENK["card"], fg=RENK["isim"],
+                 font=("Segoe UI", 9), wraplength=CARD_W - 20,
+                 justify="left", anchor="w").pack(anchor="w", padx=10, pady=(4, 0))
 
+        # --- Fiyat ---
+        fiyat_frame = tk.Frame(self, bg=RENK["card"])
+        fiyat_frame.pack(anchor="w", padx=10, pady=(4, 8), fill="x")
 
-@app.route("/proxy/img")
-def proxy_img():
-    url = request.args.get("url", "")
-    if not url.startswith("http"):
-        return "", 400
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=8)
-        content_type = r.headers.get("Content-Type", "image/jpeg")
-        return Response(r.content, content_type=content_type)
-    except Exception:
-        return "", 404
+        renk_f = RENK["en_ucuz"] if self.urun["fiyat"] == en_ucuz_fiyat and self.urun["fiyat"] < float("inf") else RENK["fiyat"]
+        fiyat_text = self.urun["fiyat_metin"] if self.urun["fiyat_metin"] != "-" else "—"
 
+        tk.Label(fiyat_frame, text=fiyat_text, bg=RENK["card"],
+                 fg=renk_f, font=("Segoe UI", 11, "bold")).pack(side="left")
 
-@app.route("/api/ara")
-def ara():
-    kelime = request.args.get("q", "").strip()
-    siteler = request.args.getlist("siteler")
-    if not kelime:
-        return jsonify({"error": "Arama kelimesi gerekli"}), 400
-    if not siteler:
-        siteler = list(SCRAPER_MAP.keys())
-    sonuclar = []
-    lock = threading.Lock()
+        if self.urun["fiyat"] == en_ucuz_fiyat and self.urun["fiyat"] < float("inf"):
+            tk.Label(fiyat_frame, text=" EN UCUZ", bg=RENK["en_ucuz"],
+                     fg="white", font=("Segoe UI", 7, "bold"),
+                     padx=3).pack(side="left", padx=(4, 0))
 
-    def calistir(site_adi):
-        fn = SCRAPER_MAP.get(site_adi)
-        if fn:
+        # --- Görsel yükle (arka plan) ---
+        if self.urun.get("img_url"):
+            threading.Thread(target=self._yukle_gorsel,
+                             args=(self.urun["img_url"],),
+                             daemon=True).start()
+
+    def _yukle_gorsel(self, url):
+        photo = indir_gorsel(url)
+        if photo:
+            self._photo = photo  # GC'den koru
             try:
-                res = fn(kelime)
+                self.img_label.config(image=photo)
             except Exception:
-                res = []
-            with lock:
-                sonuclar.extend(res)
+                pass
 
-    threads = [threading.Thread(target=calistir, args=(s,), daemon=True) for s in siteler]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    return jsonify(sonuclar)
+    def _ac(self, _=None):
+        url = self.urun.get("url", "")
+        if url.startswith("http"):
+            webbrowser.open(url)
 
+    def _hover_on(self, _=None):
+        self.config(highlightbackground=RENK["fiyat"], highlightthickness=2)
+        self.config(bg=RENK["card_hov"])
 
-# Favoriler: cihaz bazlı
-@app.route("/api/favoriler", methods=["GET"])
-def favoriler_listele():
-    device_id = request.args.get("device_id", "").strip()
-    if not device_id:
-        return jsonify({"error": "device_id gerekli"}), 400
-    data = fav_yukle()
-    device_map = data.get(device_id, {})
-    return jsonify(list(device_map.values()))
+    def _hover_off(self, _=None):
+        self.config(highlightbackground=RENK["border"], highlightthickness=1)
+        self.config(bg=RENK["card"])
 
 
-@app.route("/api/favoriler", methods=["POST"])
-def favori_ekle():
-    payload = request.json or {}
-    device_id = payload.get("device_id") or request.args.get("device_id")
-    if not device_id:
-        return jsonify({"error": "device_id gerekli"}), 400
-    urun = {
-        "site": payload.get("site", ""),
-        "isim": payload.get("isim", ""),
-        "fiyat_metin": payload.get("fiyat_metin", ""),
-        "fiyat": payload.get("fiyat"),
-        "url": payload.get("url", ""),
-        "img_url": payload.get("img_url", ""),
-    }
-    key = urun_key_from(urun)
-    kid = urun_id_from_key(key)
-    with FAV_LOCK:
-        data = fav_yukle()
-        device_map = data.setdefault(device_id, {})
-        device_map[key] = {"id": kid, **urun}
-        fav_kaydet(data)
-    return jsonify({"ok": True, "id": kid, "key": key})
+# ---------------------------------------------------------------------------
+# Ana Uygulama
+# ---------------------------------------------------------------------------
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("⚡ Elektronik Fiyat Karşılaştırma")
+        self.geometry("1200x780")
+        self.minsize(800, 500)
+        self.configure(bg=RENK["bg"])
+        self._sonuclar: list[dict] = []
+        self._site_vars: dict[str, tk.BooleanVar] = {}
+        self._kart_widgetleri: list[UrunKarti] = []
+        self._build_ui()
+
+    # ------------------------------------------------------------------
+    def _build_ui(self):
+        # ========= HEADER =========
+        hdr = tk.Frame(self, bg=RENK["header"], pady=0)
+        hdr.pack(fill="x")
+
+        logo = tk.Label(hdr, text="⚡ Fiyat Karşılaştırma",
+                        font=("Segoe UI", 17, "bold"),
+                        fg="white", bg=RENK["header"], pady=12, padx=16)
+        logo.pack(side="left")
+
+        # ========= ARAMA ÇUBUĞU =========
+        arama_outer = tk.Frame(self, bg=RENK["header"], pady=0)
+        arama_outer.pack(fill="x")
+
+        arama_inner = tk.Frame(arama_outer, bg=RENK["header"], padx=16, pady=8)
+        arama_inner.pack()
+
+        self.arama_var = tk.StringVar()
+        entry = tk.Entry(arama_inner, textvariable=self.arama_var,
+                         font=("Segoe UI", 13),
+                         bg=RENK["input_bg"], fg="#222",
+                         insertbackground="#333",
+                         relief="flat", width=42)
+        entry.pack(side="left", ipady=8, padx=(0, 0))
+        entry.bind("<Return>", lambda _: self._ara())
+
+        ara_btn = tk.Button(arama_inner, text="  Ara  ",
+                            command=self._ara,
+                            bg="#CC4C00", fg="white",
+                            font=("Segoe UI", 12, "bold"),
+                            relief="flat", cursor="hand2",
+                            activebackground="#AA3A00",
+                            padx=10, pady=0)
+        ara_btn.pack(side="left", ipady=8)
+
+        # ========= FİLTRE ÇUBUĞU =========
+        filtre_frame = tk.Frame(self, bg="#EFEFEF", pady=5, padx=16)
+        filtre_frame.pack(fill="x")
+
+        tk.Label(filtre_frame, text="Siteler:", fg="#444",
+                 bg="#EFEFEF", font=("Segoe UI", 9, "bold")).pack(side="left")
+
+        for s in SCRAPERS:
+            var = tk.BooleanVar(value=True)
+            self._site_vars[s.site_adi] = var
+            renk = SITE_RENK.get(s.site_adi, "#888")
+            cb = tk.Checkbutton(filtre_frame, text=s.site_adi,
+                                variable=var, fg=renk,
+                                bg="#EFEFEF", selectcolor="#EFEFEF",
+                                activebackground="#EFEFEF",
+                                font=("Segoe UI", 9, "bold"))
+            cb.pack(side="left", padx=(6, 0))
+
+        # Sırala
+        tk.Label(filtre_frame, text="   Sırala:", fg="#444",
+                 bg="#EFEFEF", font=("Segoe UI", 9)).pack(side="left")
+        self.siralama_var = tk.StringVar(value="Fiyat (Artan)")
+        sort_cb = ttk.Combobox(filtre_frame, textvariable=self.siralama_var,
+                               values=["Fiyat (Artan)", "Fiyat (Azalan)", "Site"],
+                               state="readonly", width=14)
+        sort_cb.pack(side="left", padx=(4, 0))
+        sort_cb.bind("<<ComboboxSelected>>", lambda _: self._goster(self._sonuclar))
+
+        # Durum
+        self.durum_var = tk.StringVar(value="Arama yapmak için ürün adı girin.")
+        tk.Label(filtre_frame, textvariable=self.durum_var,
+                 fg="#888", bg="#EFEFEF",
+                 font=("Segoe UI", 9)).pack(side="right", padx=8)
+
+        self.progress = ttk.Progressbar(filtre_frame, mode="indeterminate", length=120)
+
+        # ========= KART ALANI =========
+        container = tk.Frame(self, bg=RENK["bg"])
+        container.pack(fill="both", expand=True)
+
+        self.canvas = tk.Canvas(container, bg=RENK["bg"],
+                                highlightthickness=0)
+        self.canvas.pack(side="left", fill="both", expand=True)
+
+        vsb = ttk.Scrollbar(container, orient="vertical",
+                            command=self.canvas.yview)
+        vsb.pack(side="right", fill="y")
+        self.canvas.configure(yscrollcommand=vsb.set)
+
+        self.kart_frame = tk.Frame(self.canvas, bg=RENK["bg"])
+        self._frame_id = self.canvas.create_window((0, 0),
+                                                   window=self.kart_frame,
+                                                   anchor="nw")
+        self.kart_frame.bind("<Configure>", self._on_kart_frame_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+
+    # ------------------------------------------------------------------
+    def _on_kart_frame_configure(self, _):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event):
+        self.canvas.itemconfig(self._frame_id, width=event.width)
+        if self._sonuclar:
+            self._goster(self._sonuclar)
+
+    def _on_mousewheel(self, event):
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    # ------------------------------------------------------------------
+    def _ara(self):
+        kelime = self.arama_var.get().strip()
+        if not kelime:
+            messagebox.showwarning("Uyarı", "Lütfen bir ürün adı girin.")
+            return
+        secili = [s for s in SCRAPERS if self._site_vars[s.site_adi].get()]
+        if not secili:
+            messagebox.showwarning("Uyarı", "En az bir site seçin.")
+            return
+
+        self._temizle_kartlar()
+        self.progress.pack(side="right", padx=8)
+        self.progress.start(12)
+        self.durum_var.set(f"'{kelime}' aranıyor…")
+        self._sonuclar = []
+
+        def calis():
+            lock = threading.Lock()
+            threads = []
+            for scraper in secili:
+                t = threading.Thread(target=self._calistir,
+                                     args=(scraper, kelime, lock),
+                                     daemon=True)
+                threads.append(t)
+                t.start()
+            for t in threads:
+                t.join()
+            self.after(0, self._arama_bitti)
+
+        threading.Thread(target=calis, daemon=True).start()
+
+    def _calistir(self, scraper, kelime, lock):
+        try:
+            sonuclar = scraper.ara(kelime)
+        except Exception:
+            sonuclar = []
+        with lock:
+            self._sonuclar.extend(sonuclar)
+
+    def _arama_bitti(self):
+        self.progress.stop()
+        self.progress.pack_forget()
+        gercek = [r for r in self._sonuclar if r["fiyat"] < float("inf")]
+        self.durum_var.set(
+            f"{len(gercek)} ürün bulundu — {len(self._sonuclar)} toplam sonuç"
+        )
+        self._goster(self._sonuclar)
+
+    # ------------------------------------------------------------------
+    def _temizle_kartlar(self):
+        for w in self._kart_widgetleri:
+            w.destroy()
+        self._kart_widgetleri.clear()
+
+    def _goster(self, sonuclar: list[dict]):
+        self._temizle_kartlar()
+        if not sonuclar:
+            return
+
+        siralama = self.siralama_var.get()
+        if siralama == "Fiyat (Artan)":
+            sirali = sorted(sonuclar, key=lambda r: r["fiyat"])
+        elif siralama == "Fiyat (Azalan)":
+            sirali = sorted(sonuclar, key=lambda r: r["fiyat"]
+                            if r["fiyat"] < float("inf") else -1, reverse=True)
+        else:
+            sirali = sorted(sonuclar, key=lambda r: r["site"])
+
+        gecerli = [r["fiyat"] for r in sirali if r["fiyat"] < float("inf")]
+        en_ucuz = min(gecerli) if gecerli else float("inf")
+
+        # Sütun sayısını hesapla
+        canvas_w = self.canvas.winfo_width() or 1100
+        cols = max(1, canvas_w // (CARD_W + 16))
+
+        for idx, urun in enumerate(sirali):
+            row = idx // cols
+            col = idx % cols
+            kart = UrunKarti(self.kart_frame, urun, en_ucuz,
+                             width=CARD_W, height=CARD_H)
+            kart.grid(row=row, column=col, padx=8, pady=8, sticky="n")
+            self._kart_widgetleri.append(kart)
+
+        self.canvas.yview_moveto(0)
 
 
-@app.route("/api/favoriler", methods=["DELETE"])
-def favori_cikar():
-    device_id = request.args.get("device_id", "").strip()
-    key = request.args.get("key", "").strip()
-    if not device_id or not key:
-        return jsonify({"error": "device_id ve key gerekli"}), 400
-    with FAV_LOCK:
-        data = fav_yukle()
-        device_map = data.get(device_id, {})
-        if key in device_map:
-            device_map.pop(key, None)
-            data[device_id] = device_map
-            fav_kaydet(data)
-    return jsonify({"ok": True})
-
-
-@app.route("/api/favoriler/kontrol", methods=["POST"])
-def favori_kontrol():
-    payload = request.json or {}
-    device_id = payload.get("device_id")
-    urun = payload.get("urun") or {}
-    if not device_id:
-        return jsonify({"error": "device_id gerekli"}), 400
-    key = urun.get("url") or (urun.get("site", "") + urun.get("isim", ""))
-    data = fav_yukle()
-    device_map = data.get(device_id, {})
-    exists = key in device_map
-    return jsonify({"favori": exists, "key": key, "id": device_map.get(key, {}).get("id")})
-
-
-@app.route("/sitemap.xml")
-def sitemap():
-    base_url = request.url_root.rstrip("/")
-    urls = []
-    urls.append({"loc": base_url + "/", "lastmod": datetime.utcnow().date().isoformat(), "changefreq": "daily", "priority": "1.0"})
-    urls.append({"loc": base_url + "/?q=", "lastmod": datetime.utcnow().date().isoformat(), "changefreq": "weekly", "priority": "0.5"})
-    favs = fav_yukle()
-    for device_map in favs.values():
-        for v in device_map.values():
-            url = v.get("url")
-            if url:
-                if url.startswith("http"):
-                    urls.append({"loc": url, "lastmod": datetime.utcnow().date().isoformat(), "changefreq": "monthly", "priority": "0.6"})
-                else:
-                    urls.append({"loc": base_url + url, "lastmod": datetime.utcnow().date().isoformat(), "changefreq": "monthly", "priority": "0.6"})
-    xml_items = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
-    for u in urls:
-        xml_items.append("  <url>")
-        xml_items.append(f"    <loc>{u['loc']}</loc>")
-        if u.get("lastmod"):
-            xml_items.append(f"    <lastmod>{u['lastmod']}</lastmod>")
-        if u.get("changefreq"):
-            xml_items.append(f"    <changefreq>{u['changefreq']}</changefreq>")
-        if u.get("priority"):
-            xml_items.append(f"    <priority>{u['priority']}</priority>")
-        xml_items.append("  </url>")
-    xml_items.append("</urlset>")
-    xml = "\n".join(xml_items)
-    return Response(xml, content_type="application/xml")
-
-
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    app.run(debug=True)
+    app = App()
+    app.mainloop()
