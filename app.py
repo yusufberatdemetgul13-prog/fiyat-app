@@ -6,6 +6,7 @@ import json
 import os
 import hashlib
 import threading
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -40,9 +41,14 @@ def get_soup(url):
 
 
 def href_to_abs(href, base):
-    if href and not href.startswith("http"):
-        return base + href
-    return href or ""
+    if not href:
+        return ""
+    if href.startswith("http"):
+        return href
+    # ensure base ends without trailing slash if href starts with '/'
+    if href.startswith("/"):
+        return base.rstrip("/") + href
+    return base.rstrip("/") + "/" + href.lstrip("/")
 
 
 def urun_id(urun):
@@ -150,11 +156,53 @@ def ara_motorobit(kelime):
     return urunler
 
 
+# Yeni: robocombo için scraper
+def ara_robocombo(kelime):
+    base = "https://www.robocombo.com"
+    url = f"{base}/arama?q={requests.utils.quote(kelime)}"
+    soup = get_soup(url)
+    if not soup:
+        return []
+    urunler = []
+    # sayfa yapısı farklı olabilir; birkaç farklı selector denemesi yapıyoruz
+    items = soup.select(".product-item, .product, .productCard, .item")
+    if not items:
+        # fallback: linkleri tarayıp ürün başlıklarını al
+        for a in soup.select("a"):
+            title = a.get("title") or a.get_text(strip=True)
+            href = a.get("href", "")
+            if title and href and len(title) > 3:
+                urunler.append({"site": "robocombo.com", "isim": title,
+                                "fiyat_metin": "", "fiyat": None,
+                                "url": href_to_abs(href, base), "img_url": ""})
+        return urunler
+
+    for item in items:
+        isim_el = item.select_one("a.product-title, a.title, .product-title a, .title a")
+        if not isim_el:
+            isim_el = item.select_one("h2 a, h3 a, a")
+        isim = isim_el.get_text(strip=True) if isim_el else ""
+        if not isim:
+            continue
+        fiyat_el = item.select_one(".price, .product-price, .price-new, .price-current")
+        fiyat_metin = fiyat_el.get_text(strip=True) if fiyat_el else ""
+        href = href_to_abs(isim_el.get("href", "") if isim_el else "", base)
+        img_el = item.select_one("img, .product-image img")
+        img_url = ""
+        if img_el:
+            img_url = img_el.get("data-src") or img_el.get("src") or ""
+        urunler.append({"site": "robocombo.com", "isim": isim,
+                        "fiyat_metin": fiyat_metin, "fiyat": temizle_fiyat(fiyat_metin),
+                        "url": href, "img_url": img_url})
+    return urunler
+
+
 SCRAPER_MAP = {
     "direnc.net": ara_direnc,
     "robotistan.com": ara_robotistan,
     "robolinkmarket.com": ara_robolinkmarket,
     "motorobit.com": ara_motorobit,
+    "robocombo.com": ara_robocombo,  # eklendi
 }
 
 
@@ -252,6 +300,46 @@ def favori_kontrol():
     data = fav_yukle()
     kid = urun_id(urun)
     return jsonify({"favori": kid in data, "id": kid})
+
+
+# Yeni rota: sitemap.xml
+@app.route("/sitemap.xml")
+def sitemap():
+    base_url = request.url_root.rstrip("/")
+    urls = []
+    # Kök sayfa
+    urls.append({"loc": base_url + "/", "lastmod": datetime.utcnow().date().isoformat(), "changefreq": "daily", "priority": "1.0"})
+    # Örnek arama sayfası (isteğe bağlı)
+    urls.append({"loc": base_url + "/?q=", "lastmod": datetime.utcnow().date().isoformat(), "changefreq": "weekly", "priority": "0.5"})
+    # Favorilerdeki ürünler
+    favs = fav_yukle()
+    for v in favs.values():
+        url = v.get("url")
+        if url:
+            # Eğer favorideki url tam bir dış URL ise sitemap'a eklemek isteğe bağlıdır.
+            # Burada sadece kendi site içi yollar ekleniyor; dış URL'leri de eklemek istersen true yap.
+            if url.startswith("http"):
+                # dış URL eklemek istersen aşağıdaki satırı kullan; şu an ekliyoruz
+                urls.append({"loc": url, "lastmod": datetime.utcnow().date().isoformat(), "changefreq": "monthly", "priority": "0.6"})
+            else:
+                urls.append({"loc": base_url + url, "lastmod": datetime.utcnow().date().isoformat(), "changefreq": "monthly", "priority": "0.6"})
+    # XML oluştur
+    xml_items = []
+    xml_items.append('<?xml version="1.0" encoding="UTF-8"?>')
+    xml_items.append('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">')
+    for u in urls:
+        xml_items.append("  <url>")
+        xml_items.append(f"    <loc>{u['loc']}</loc>")
+        if u.get("lastmod"):
+            xml_items.append(f"    <lastmod>{u['lastmod']}</lastmod>")
+        if u.get("changefreq"):
+            xml_items.append(f"    <changefreq>{u['changefreq']}</changefreq>")
+        if u.get("priority"):
+            xml_items.append(f"    <priority>{u['priority']}</priority>")
+        xml_items.append("  </url>")
+    xml_items.append("</urlset>")
+    xml = "\n".join(xml_items)
+    return Response(xml, content_type="application/xml")
 
 
 if __name__ == "__main__":
