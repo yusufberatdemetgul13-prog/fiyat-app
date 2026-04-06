@@ -1,5 +1,5 @@
 # app.py
-from flask import Flask, render_template, request, jsonify, Response, send_from_directory
+from flask import Flask, render_template, request, jsonify, Response
 import requests
 from bs4 import BeautifulSoup
 import re
@@ -8,6 +8,7 @@ import os
 import hashlib
 import threading
 from datetime import datetime
+from urllib.parse import urljoin
 
 app = Flask(__name__, static_folder='static', template_folder='templates')
 
@@ -29,9 +30,9 @@ def temizle_fiyat(metin):
     if not metin:
         return None
     metin = metin.replace(".", "").replace(",", ".").strip()
-    sayilar = re.findall(r"[\d.]+", metin)
+    m = re.search(r"[\d\.]+", metin)
     try:
-        return float(sayilar[0]) if sayilar else None
+        return float(m.group(0)) if m else None
     except Exception:
         return None
 
@@ -62,6 +63,8 @@ def urun_key_from(urun):
 def urun_id_from_key(key):
     return hashlib.md5(key.encode()).hexdigest()
 
+
+# --- Scrapers for each site (direnc, robotistan, robolinkmarket, motorobit, robocombo) ---
 
 def ara_direnc(kelime):
     base = "https://www.direnc.net"
@@ -163,42 +166,148 @@ def ara_motorobit(kelime):
     return urunler
 
 
+# --- Enhanced robocombo scraper (tries ld+json, inline state, discovered endpoints, fallback selectors) ---
 def ara_robocombo(kelime):
     base = "https://www.robocombo.com"
     url = f"{base}/arama?q={requests.utils.quote(kelime)}"
-    soup = get_soup(url)
-    if not soup:
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+    except Exception:
         return []
-    urunler = []
-    items = soup.select(".product-item, .product, .productCard, .item")
-    if not items:
-        for a in soup.select("a"):
-            title = a.get("title") or a.get_text(strip=True)
-            href = a.get("href", "")
-            if title and href and len(title) > 3:
-                urunler.append({"site": "robocombo.com", "isim": title,
-                                "fiyat_metin": "", "fiyat": None,
-                                "url": href_to_abs(href, base), "img_url": ""})
-        return urunler
+    if r.status_code != 200:
+        return []
+    soup = BeautifulSoup(r.text, "html.parser")
 
-    for item in items:
-        isim_el = item.select_one("a.product-title, a.title, .product-title a, .title a")
-        if not isim_el:
-            isim_el = item.select_one("h2 a, h3 a, a")
-        isim = isim_el.get_text(strip=True) if isim_el else ""
-        if not isim:
+    # 1) ld+json
+    items = []
+    for s in soup.select('script[type="application/ld+json"]'):
+        try:
+            data = json.loads(s.string or "{}")
+        except Exception:
             continue
-        fiyat_el = item.select_one(".price, .product-price, .price-new, .price-current")
+        if isinstance(data, dict):
+            data = [data]
+        for d in data:
+            if not isinstance(d, dict):
+                continue
+            if d.get("@type") in ("Product", "Offer") or "offers" in d:
+                name = d.get("name") or d.get("headline") or ""
+                offers = d.get("offers") or {}
+                price = None
+                price_text = ""
+                if isinstance(offers, dict):
+                    price = offers.get("price")
+                    price_text = (offers.get("priceCurrency", "") + " " + str(price)).strip()
+                image = d.get("image") or ""
+                link = d.get("url") or ""
+                items.append({"site": "robocombo.com", "isim": name,
+                              "fiyat_metin": price_text, "fiyat": float(price) if price else None,
+                              "url": link, "img_url": image})
+    if items:
+        return items
+
+    # 2) inline global state
+    scripts_text = "".join([s.string or "" for s in soup.select("script")])
+    m = re.search(r'(window\.__INITIAL_STATE__|__INITIAL_STATE__|window\.__DATA__|__DATA__)\s*=\s*({.+?});', scripts_text, re.S)
+    if m:
+        js = m.group(2)
+        try:
+            data = json.loads(js)
+        except Exception:
+            try:
+                js2 = re.sub(r'(\w+):', r'"\1":', js)
+                data = json.loads(js2)
+            except Exception:
+                data = None
+        if data:
+            found = []
+            def walk(o):
+                if isinstance(o, dict):
+                    for v in o.values():
+                        walk(v)
+                elif isinstance(o, list):
+                    for el in o:
+                        if isinstance(el, dict):
+                            name = el.get("name") or el.get("title") or el.get("productName") or ""
+                            price = el.get("price") or (el.get("offers", {}).get("price") if isinstance(el.get("offers"), dict) else None)
+                            img = el.get("image") or el.get("img") or ""
+                            link = el.get("url") or el.get("link") or ""
+                            if name:
+                                found.append({"site": "robocombo.com", "isim": name,
+                                              "fiyat_metin": str(price) if price else "", "fiyat": float(price) if price else None,
+                                              "url": urljoin(base, link) if link else "", "img_url": img})
+                            else:
+                                walk(el)
+            walk(data)
+            if found:
+                return found
+
+    # 3) discover API endpoints in scripts and try them
+    endpoints = set()
+    for mm in re.finditer(r'["\'](\/[a-zA-Z0-9_\-\/]*?(?:api|search|arama|products|product|catalog)[a-zA-Z0-9_\-\/]*?)["\']', r.text):
+        endpoints.add(urljoin(base, mm.group(1)))
+    for mm in re.finditer(r'["\'](https?:\/\/[^"\']*?(?:api|search|arama|products|product|catalog)[^"\']*)["\']', r.text):
+        endpoints.add(mm.group(1))
+    for ep in endpoints:
+        try:
+            rr = requests.get(ep, params={"q": kelime}, headers=HEADERS, timeout=8)
+            if rr.status_code != 200:
+                rr = requests.post(ep, json={"q": kelime}, headers=HEADERS, timeout=8)
+            if rr.status_code == 200:
+                try:
+                    data = rr.json()
+                except Exception:
+                    data = None
+                if isinstance(data, dict):
+                    for key in ("items", "products", "data", "results", "hits"):
+                        if key in data and isinstance(data[key], list):
+                            found = []
+                            for el in data[key]:
+                                if not isinstance(el, dict):
+                                    continue
+                                name = el.get("name") or el.get("title") or el.get("productName") or ""
+                                price = el.get("price") or (el.get("offers", {}).get("price") if isinstance(el.get("offers"), dict) else None)
+                                img = el.get("image") or el.get("img") or ""
+                                link = el.get("url") or el.get("link") or ""
+                                if name:
+                                    found.append({"site": "robocombo.com", "isim": name,
+                                                  "fiyat_metin": str(price) if price else "", "fiyat": float(price) if price else None,
+                                                  "url": urljoin(base, link) if link else "", "img_url": img})
+                            if found:
+                                return found
+                elif isinstance(data, list):
+                    found = []
+                    for el in data:
+                        if isinstance(el, dict):
+                            name = el.get("name") or el.get("title") or ""
+                            price = el.get("price")
+                            img = el.get("image") or ""
+                            link = el.get("url") or ""
+                            if name:
+                                found.append({"site": "robocombo.com", "isim": name,
+                                              "fiyat_metin": str(price) if price else "", "fiyat": float(price) if price else None,
+                                              "url": urljoin(base, link) if link else "", "img_url": img})
+                    if found:
+                        return found
+        except Exception:
+            continue
+
+    # 4) fallback: HTML selectors
+    fallback = []
+    for item in soup.select(".product-item, .product, .productCard, .item, .product-list-item, .product-card"):
+        isim_el = item.select_one("a.product-title, a.title, .product-title a, .title a, h2 a, h3 a, a")
+        if not isim_el:
+            continue
+        isim = isim_el.get_text(strip=True)
+        fiyat_el = item.select_one(".price, .product-price, .price-new, .price-current, .price-amount")
         fiyat_metin = fiyat_el.get_text(strip=True) if fiyat_el else ""
-        href = href_to_abs(isim_el.get("href", "") if isim_el else "", base)
+        href = isim_el.get("href") or ""
         img_el = item.select_one("img, .product-image img")
-        img_url = ""
-        if img_el:
-            img_url = img_el.get("data-src") or img_el.get("src") or ""
-        urunler.append({"site": "robocombo.com", "isim": isim,
-                        "fiyat_metin": fiyat_metin, "fiyat": temizle_fiyat(fiyat_metin),
-                        "url": href, "img_url": img_url})
-    return urunler
+        img_url = (img_el.get("data-src") or img_el.get("src")) if img_el else ""
+        fallback.append({"site": "robocombo.com", "isim": isim,
+                         "fiyat_metin": fiyat_metin, "fiyat": None if not fiyat_metin else temizle_fiyat(fiyat_metin),
+                         "url": urljoin(base, href), "img_url": img_url})
+    return fallback
 
 
 SCRAPER_MAP = {
@@ -210,6 +319,7 @@ SCRAPER_MAP = {
 }
 
 
+# --- Favorites (device-based) storage helpers ---
 def fav_yukle():
     if os.path.exists(FAV_DOSYA):
         try:
@@ -226,6 +336,7 @@ def fav_kaydet(data):
             json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+# --- Routes ---
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -238,7 +349,8 @@ def proxy_img():
         return "", 400
     try:
         r = requests.get(url, headers=HEADERS, timeout=8)
-        return Response(r.content, content_type=r.headers.get("Content-Type", "image/jpeg"))
+        content_type = r.headers.get("Content-Type", "image/jpeg")
+        return Response(r.content, content_type=content_type)
     except Exception:
         return "", 404
 
@@ -280,7 +392,6 @@ def favoriler_listele():
         return jsonify({"error": "device_id gerekli"}), 400
     data = fav_yukle()
     device_map = data.get(device_id, {})
-    # döndür: liste halinde
     return jsonify(list(device_map.values()))
 
 
@@ -338,7 +449,6 @@ def favori_kontrol():
     return jsonify({"favori": exists, "key": key, "id": device_map.get(key, {}).get("id")})
 
 
-# sitemap
 @app.route("/sitemap.xml")
 def sitemap():
     base_url = request.url_root.rstrip("/")
